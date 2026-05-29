@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bounded RAG Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero panel">
+        <div>
+          <p class="eyebrow">Enterprise Knowledge Boundary</p>
+          <h1>有边界感的 RAG 知识库</h1>
+          <p class="hero-copy">
+            选择一个知识库后，问答、写文档、引用来源都会被限制在当前知识库内。
+            A 的资料不进 B 的上下文，B 的技能也不会借 A 的手。
+          </p>
+        </div>
+        <div class="status-card">
+          <span class="status-dot"></span>
+          <span id="activeKbLabel">尚未选择知识库</span>
+        </div>
+      </section>
+
+      <section class="grid">
+        <aside class="panel sidebar">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Knowledge Bases</p>
+              <h2>知识库</h2>
+            </div>
+            <button id="refreshBtn" class="ghost" type="button">刷新</button>
+          </div>
+
+          <div class="boundary-mini">
+            <span>当前边界</span>
+            <strong id="sidebarActiveKb">未选择</strong>
+            <p id="sidebarBoundaryMeta">选择知识库后，问答、文档和生成都会锁定到同一边界。</p>
+          </div>
+
+          <label class="search-box">
+            搜索知识库
+            <input id="kbSearch" placeholder="输入名称、ID、租户或技能" />
+          </label>
+
+          <details class="create-kb">
+            <summary>创建新知识库</summary>
+            <form id="kbForm" class="stack">
+	              <label>
+	                知识库 ID
+	                <input id="kbId" required pattern="[a-zA-Z0-9_-]{2,64}" placeholder="kb_hr" title="只能包含英文、数字、下划线、短横线，长度 2-64" />
+	                <small class="field-hint">只能包含英文、数字、下划线、短横线，长度 2-64；中文请填在“名称”。</small>
+	              </label>
+              <label>
+                名称
+                <input id="kbName" required placeholder="人事制度库" />
+              </label>
+              <label>
+                租户 ID
+                <input id="kbTenantId" placeholder="default" value="default" />
+              </label>
+              <label>
+                知识库权限标签
+                <input id="kbPermissionTags" placeholder="hr, finance，可留空" />
+              </label>
+              <label>
+                允许技能
+                <select id="kbSkills" multiple>
+                  <option value="answer_question" selected>问答</option>
+                  <option value="write_document" selected>写文档</option>
+                  <option value="write_markdown" selected>写 Markdown</option>
+                  <option value="write_word" selected>写 Word</option>
+                  <option value="write_ppt" selected>写 PPT</option>
+                </select>
+              </label>
+              <button type="submit">创建知识库</button>
+            </form>
+          </details>
+
+          <div id="kbList" class="kb-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="workspace">
+          <div class="panel boundary">
+            <p class="eyebrow">Current Boundary</p>
+            <div class="boundary-row">
+              <strong id="boundaryTitle">选择知识库后开始</strong>
+              <span id="boundarySkills">skills: -</span>
+            </div>
+            <div id="modelStatus" class="model-status">模型配置加载中...</div>
+            <div class="identity-row" aria-label="当前演示身份">
+              <span>用户：<strong id="identityUser">demo-user</strong></span>
+              <span>租户：<strong id="identityTenant">default</strong></span>
+              <span>权限：<strong id="identityTags">hr, finance, salary</strong></span>
+            </div>
+          </div>
+
+          <nav class="tabs" aria-label="工作区导航">
+            <button class="tab active" data-tab="ask" type="button">问答</button>
+            <button class="tab" data-tab="documents" type="button">文档</button>
+            <button class="tab" data-tab="generate" type="button">生成</button>
+            <button class="tab" data-tab="settings" type="button">设置</button>
+          </nav>
+
+          <div id="operationStatus" class="operation-status" role="status" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="operationStatusText">准备就绪。选择知识库后开始工作。</span>
+          </div>
+
+          <section class="tab-panel active" data-panel="ask">
+            <article class="panel card">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Ask</p>
+                  <h2>知识库问答</h2>
+                </div>
+                <span class="pill">answer_question</span>
+              </div>
+	              <form id="queryForm" class="stack">
+	                <label>
+	                  问题
+	                  <textarea id="question" required rows="5" placeholder="比如：报销需要多久内提交？"></textarea>
+	                </label>
+	                <button id="querySubmit" type="submit">只在当前知识库中回答</button>
+	              </form>
+	            </article>
+
+	            <article class="panel result-panel">
+	              <div class="section-head">
+	                <div>
+	                  <p class="eyebrow">Answer</p>
+	                  <h2>回答与来源</h2>
+	                </div>
+	                <span id="traceId" class="trace"></span>
+	              </div>
+	              <pre id="answerBox">问答结果会显示在这里。</pre>
+	              <div id="artifactBox" class="artifact-box"></div>
+	              <div id="sources" class="sources"></div>
+	            </article>
+	          </section>
+
+          <section class="tab-panel" data-panel="documents">
+            <div class="cards">
+            <article class="panel card">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Ingest</p>
+                  <h2>录入文档</h2>
+                </div>
+              </div>
+              <form id="docForm" class="stack">
+                <label>
+                  标题
+                  <input id="docTitle" required placeholder="报销制度" />
+                </label>
+                <label>
+                  内容
+                  <textarea id="docContent" required rows="8" placeholder="粘贴制度、说明、FAQ 或内部文档内容"></textarea>
+                </label>
+                <label>
+                  文档权限标签
+                  <input id="docPermissionTags" placeholder="hr, finance，可留空" />
+                </label>
+                <button type="submit">写入当前知识库</button>
+              </form>
+              <div class="divider"></div>
+              <form id="uploadForm" class="stack">
+                <label>
+                  上传文件
+                  <input id="uploadFile" required type="file" accept=".md,.markdown,.docx,.pptx" />
+                </label>
+                <label>
+                  上传文件权限标签
+                  <input id="uploadPermissionTags" placeholder="hr, finance，可留空" />
+                </label>
+                <button type="submit">上传并入库</button>
+              </form>
+            </article>
+
+            <article class="panel card">
+	              <div class="section-head">
+	                <div>
+	                  <p class="eyebrow">Documents</p>
+	                  <h2>文档管理</h2>
+	                </div>
+	                <button id="reloadDocsBtn" class="ghost" type="button">刷新文档</button>
+	              </div>
+	              <div class="filters">
+	                <label>
+	                  搜索
+	                  <input id="docSearch" placeholder="标题、ID、标签或错误信息" />
+	                </label>
+	                <label>
+	                  状态
+	                  <select id="docStatusFilter">
+	                    <option value="">全部状态</option>
+	                    <option value="indexed">indexed</option>
+	                    <option value="indexing">indexing</option>
+	                    <option value="failed">failed</option>
+	                  </select>
+	                </label>
+	                <label>
+	                  标签
+	                  <input id="docTagFilter" placeholder="如 salary" />
+	                </label>
+	                <label>
+	                  排序
+	                  <select id="docSort">
+	                    <option value="newest">最新创建</option>
+	                    <option value="oldest">最早创建</option>
+	                    <option value="title">标题 A-Z</option>
+	                    <option value="status">状态</option>
+	                  </select>
+	                </label>
+	              </div>
+	              <div id="documentList" class="document-list">选择知识库后会显示文档。</div>
+	            </article>
+          </div>
+
+          <article class="panel card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Preview</p>
+                <h2>解析文本预览</h2>
+              </div>
+            </div>
+            <pre id="documentPreview" class="preview-box">点击文档的“预览”查看解析后的入库文本。</pre>
+          </article>
+          </section>
+
+          <section class="tab-panel" data-panel="generate">
+          <article class="panel card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Skill</p>
+                <h2>基于知识库生成文件</h2>
+              </div>
+              <span id="selectedSkillPill" class="pill">write_document</span>
+            </div>
+	            <form id="skillForm" class="skill-form">
+              <label>
+                输出类型
+                <select id="skillName">
+                  <option value="write_document">普通文档</option>
+                  <option value="write_markdown">Markdown</option>
+                  <option value="write_word">Word (.docx)</option>
+                  <option value="write_ppt">PPT (.pptx)</option>
+                </select>
+              </label>
+              <label>
+                写作指令
+                <input id="instruction" required placeholder="写一份报销提醒通知" />
+              </label>
+	              <button id="skillSubmit" type="submit">执行技能</button>
+	            </form>
+	          </article>
+
+	          <article class="panel result-panel">
+	            <div class="section-head">
+	              <div>
+	                <p class="eyebrow">Generated</p>
+	                <h2>生成结果</h2>
+	              </div>
+	              <span id="generateTraceId" class="trace"></span>
+	            </div>
+	            <pre id="generateAnswerBox">生成结果会显示在这里。</pre>
+	            <div id="generateArtifactBox" class="artifact-box"></div>
+	            <div id="generateSources" class="sources"></div>
+	          </article>
+
+          <article class="panel card">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow">Artifacts</p>
+                <h2>生成历史</h2>
+              </div>
+              <button id="reloadArtifactsBtn" class="ghost" type="button">刷新历史</button>
+            </div>
+	            <div id="artifactList" class="document-list">选择知识库后会显示生成文件。</div>
+	          </article>
+
+	          <article class="panel card">
+	            <div class="section-head">
+	              <div>
+	                <p class="eyebrow">Preview</p>
+	                <h2>生成文件预览</h2>
+	              </div>
+	            </div>
+	            <pre id="artifactPreview" class="preview-box">点击生成历史的“预览”查看文件内容。</pre>
+	          </article>
+	          </section>
+
+          <section class="tab-panel" data-panel="settings">
+            <article class="panel card">
+              <div class="section-head">
+                <div>
+                  <p class="eyebrow">Settings</p>
+                  <h2>边界与身份</h2>
+                </div>
+              </div>
+              <div class="settings-grid">
+                <div class="setting-tile">
+                  <span>当前身份</span>
+                  <strong id="settingsIdentity">demo-user / default</strong>
+                  <p>这是演示身份。真实生产环境应由登录态或 JWT 提供，前端只读展示。</p>
+                </div>
+	                <div class="setting-tile">
+	                  <span>登录状态</span>
+	                  <strong id="authModeLabel">Demo 请求头</strong>
+	                  <p id="tokenExpiry">未使用 JWT。生产环境可粘贴 Token 切换为 Bearer 鉴权。</p>
+	                  <details class="token-details">
+	                    <summary>管理 Token</summary>
+	                    <label>
+	                      Bearer Token
+	                      <textarea id="authToken" rows="4" placeholder="粘贴 JWT 后会通过 Authorization: Bearer 发送"></textarea>
+	                    </label>
+	                  </details>
+	                  <div class="document-actions">
+	                    <button id="saveAuthTokenBtn" class="ghost" type="button">保存 Token</button>
+	                    <button id="clearAuthTokenBtn" class="danger" type="button">退出登录</button>
+	                  </div>
+	                </div>
+                <div class="setting-tile">
+                  <span>当前知识库</span>
+                  <strong id="settingsKnowledgeBase">未选择</strong>
+                  <p id="settingsKnowledgeBaseMeta">选择知识库后会显示租户、技能和权限标签。</p>
+                </div>
+              </div>
+            </article>
+          </section>
+
+	        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

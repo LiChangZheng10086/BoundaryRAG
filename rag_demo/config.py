@@ -1,0 +1,52 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class Settings:
+    data_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_DATA_DIR", ".rag_data")))
+    artifact_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_ARTIFACT_DIR", ".rag_data/artifacts")))
+    max_upload_bytes: int = field(default_factory=lambda: int(os.getenv("RAG_MAX_UPLOAD_MB", "25")) * 1024 * 1024)
+    upload_parse_timeout_seconds: float = field(
+        default_factory=lambda: float(os.getenv("RAG_UPLOAD_PARSE_TIMEOUT_SECONDS", "10"))
+    )
+    max_archive_members: int = field(default_factory=lambda: int(os.getenv("RAG_MAX_ARCHIVE_MEMBERS", "512")))
+    max_archive_uncompressed_bytes: int = field(
+        default_factory=lambda: int(os.getenv("RAG_MAX_ARCHIVE_UNCOMPRESSED_MB", "100")) * 1024 * 1024
+    )
+    max_archive_compression_ratio: float = field(
+        default_factory=lambda: float(os.getenv("RAG_MAX_ARCHIVE_COMPRESSION_RATIO", "100"))
+    )
+    max_document_chars: int = field(default_factory=lambda: int(os.getenv("RAG_MAX_DOCUMENT_CHARS", "200000")))
+    auth_mode: str = field(default_factory=lambda: os.getenv("RAG_AUTH_MODE", "demo").strip().lower())
+    jwt_secret: str | None = field(default_factory=lambda: os.getenv("RAG_JWT_SECRET"))
+    jwt_issuer: str | None = field(default_factory=lambda: os.getenv("RAG_JWT_ISSUER"))
+    jwt_audience: str | None = field(default_factory=lambda: os.getenv("RAG_JWT_AUDIENCE"))
+    jwt_leeway_seconds: int = field(default_factory=lambda: int(os.getenv("RAG_JWT_LEEWAY_SECONDS", "30")))
+    embedding_provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "local"))
+    dashscope_api_key: str | None = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY"))
+    dashscope_embedding_model: str = field(
+        default_factory=lambda: os.getenv(
+            "DASHSCOPE_EMBEDDING_MODEL",
+            "tongyi-embedding-vision-flash-2026-03-06",
+        )
+    )
+    dashscope_embedding_batch_size: int = field(
+        default_factory=lambda: int(os.getenv("DASHSCOPE_EMBEDDING_BATCH_SIZE", "20"))
+    )
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "local"))
+    deepseek_api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY"))
+    deepseek_model: str = field(default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+    deepseek_base_url: str = field(default_factory=lambda: os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+
+
+def get_settings() -> Settings:
+    return Settings()
