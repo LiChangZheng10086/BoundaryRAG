@@ -1,4 +1,6 @@
-# RAG Demo
+# BoundaryRAG
+
+有边界感的 RAG 知识库。
 
 这是一个 Python RAG MVP，重点验证“多知识库边界感”：
 
