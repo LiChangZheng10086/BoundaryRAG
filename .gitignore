@@ -1,6 +1,8 @@
 .env
 .rag_data/
 .pytest_cache/
+.DS_Store
+.idea/
 *.egg-info/
 __pycache__/
 *.pyc

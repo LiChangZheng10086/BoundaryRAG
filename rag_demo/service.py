@@ -22,6 +22,7 @@ from rag_demo.models import (
 from rag_demo.retriever import Retriever
 from rag_demo.skills import SkillRegistry
 from rag_demo.store import JsonStore
+from rag_demo.vector_store import ChunkStore, create_chunk_store
 from pathlib import Path
 
 from rag_demo.document_parsers import UploadSecurityPolicy, parse_uploaded_document
@@ -35,6 +36,7 @@ class RagService:
         self,
         *,
         store: JsonStore,
+        chunk_store: ChunkStore | None = None,
         embeddings: EmbeddingProvider,
         llm: LLMProvider,
         artifact_dir: Path,
@@ -53,7 +55,11 @@ class RagService:
         self.max_document_chars = max_document_chars
         self.upload_parse_timeout_seconds = upload_parse_timeout_seconds
         self.upload_security_policy = upload_security_policy or UploadSecurityPolicy()
-        self.retriever = Retriever(store, embeddings)
+        self.chunk_store = chunk_store or create_chunk_store(
+            uri=store.data_dir / "milvus_lite.db",
+            collection_name="boundaryrag_chunks",
+        )
+        self.retriever = Retriever(self.chunk_store, embeddings)
         self.skills = SkillRegistry(artifact_dir)
 
     def create_knowledge_base(self, data: KnowledgeBaseCreate, access: AccessContext | None = None) -> KnowledgeBase:
@@ -95,10 +101,10 @@ class RagService:
         self.store.add_document(document)
         try:
             chunks = await self._build_chunks(document)
-            self.store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=chunks)
+            self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=chunks)
             return self.store.update_document_status(kb_id=kb_id, document_id=document.id, status="indexed")
         except Exception as exc:
-            self.store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=[])
+            self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=[])
             self.store.update_document_status(
                 kb_id=kb_id,
                 document_id=document.id,
@@ -145,7 +151,16 @@ class RagService:
     def list_documents(self, *, kb_id: str, access: AccessContext | None = None) -> list[DocumentSummary]:
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
-        return self.store.list_documents(kb_id=kb_id, permission_tags=access.permission_tags)
+        chunk_counts = self.chunk_store.count_chunks_by_document(
+            kb_id=kb_id,
+            tenant_id=access.tenant_id,
+            permission_tags=access.permission_tags,
+        )
+        return self.store.list_documents(
+            kb_id=kb_id,
+            permission_tags=access.permission_tags,
+            chunk_counts=chunk_counts,
+        )
 
     def get_document(self, *, kb_id: str, document_id: str, access: AccessContext | None = None) -> Document:
         access = access or AccessContext()
@@ -166,6 +181,7 @@ class RagService:
         deleted = self.store.delete_document(kb_id=kb_id, document_id=document_id)
         if not deleted:
             raise KeyError(f"document '{document_id}' does not exist")
+        self.chunk_store.delete_document_chunks(kb_id=kb_id, document_id=document_id)
 
     async def reindex_document(
         self,
@@ -183,7 +199,7 @@ class RagService:
         self.store.update_document_status(kb_id=kb_id, document_id=document_id, status="indexing")
         try:
             chunks = await self._build_chunks(document.model_copy(update={"status": "indexing", "error": ""}))
-            self.store.replace_document_chunks(kb_id=kb_id, document_id=document_id, chunks=chunks)
+            self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document_id, chunks=chunks)
             self.store.update_document_status(kb_id=kb_id, document_id=document_id, status="indexed")
             return ReindexResponse(document_id=document.id, chunk_count=len(chunks))
         except Exception as exc:

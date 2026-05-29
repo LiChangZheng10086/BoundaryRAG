@@ -29,6 +29,7 @@ from rag_demo.models import (
 )
 from rag_demo.service import RagService
 from rag_demo.store import JsonStore
+from rag_demo.vector_store import create_chunk_store
 
 
 app = FastAPI(title="RAG Demo", version="0.1.0")
@@ -79,10 +80,16 @@ async def index() -> FileResponse:
 def get_service() -> RagService:
     settings = get_settings()
     store = JsonStore(settings.data_dir)
+    chunk_store = create_chunk_store(uri=settings.milvus_uri, collection_name=settings.milvus_collection)
+    legacy_chunks = store.read_legacy_chunks()
+    if legacy_chunks:
+        chunk_store.upsert_chunks(legacy_chunks)
+        store.mark_legacy_chunks_migrated()
     embeddings = create_embedding_provider(settings)
     llm = create_llm_provider(settings)
     return RagService(
         store=store,
+        chunk_store=chunk_store,
         embeddings=embeddings,
         llm=llm,
         artifact_dir=settings.artifact_dir,
@@ -106,6 +113,9 @@ async def runtime_config() -> RuntimeConfig:
     settings = get_settings()
     return RuntimeConfig(
         auth_mode=settings.auth_mode,
+        vector_store="milvus-lite",
+        vector_store_uri=str(settings.milvus_uri),
+        vector_store_collection=settings.milvus_collection,
         llm_provider=settings.llm_provider,
         llm_model=settings.deepseek_model if settings.llm_provider == "deepseek" else "local-boundary",
         llm_ready=settings.llm_provider != "deepseek" or bool(settings.deepseek_api_key),

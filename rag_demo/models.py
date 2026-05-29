@@ -175,6 +175,9 @@ class ArtifactPreview(BaseModel):
 
 class RuntimeConfig(BaseModel):
     auth_mode: str
+    vector_store: str
+    vector_store_uri: str
+    vector_store_collection: str
     llm_provider: str
     llm_model: str
     llm_ready: bool

@@ -1,35 +1,34 @@
 from __future__ import annotations
 
-import math
-
 from rag_demo.embeddings import EmbeddingProvider
 from rag_demo.models import AccessContext, Source
-from rag_demo.store import JsonStore
+from rag_demo.vector_store import ChunkStore
 
 
 class Retriever:
-    def __init__(self, store: JsonStore, embeddings: EmbeddingProvider) -> None:
-        self.store = store
+    def __init__(self, chunk_store: ChunkStore, embeddings: EmbeddingProvider) -> None:
+        self.chunk_store = chunk_store
         self.embeddings = embeddings
 
     async def retrieve(self, *, kb_id: str, query: str, top_k: int, access: AccessContext) -> list[Source]:
         query_embedding = (await self.embeddings.embed([query]))[0]
-        chunks = self.store.list_chunks(
+        matches = self.chunk_store.search_chunks(
             kb_id=kb_id,
             tenant_id=access.tenant_id,
-            permission_tags=access.permission_tags,
+            query_embedding=query_embedding,
+            limit=max(top_k * 20, 100),
         )
         scored = [
             (
                 self._score(
                     query=query,
-                    query_embedding=query_embedding,
-                    text=chunk.text,
-                    text_embedding=chunk.embedding,
+                    vector_score=match.vector_score,
+                    text=match.chunk.text,
                 ),
-                chunk,
+                match.chunk,
             )
-            for chunk in chunks
+            for match in matches
+            if self._is_allowed(match.chunk.permission_tags, set(access.permission_tags))
         ]
         scored.sort(key=lambda item: item[0]["score"], reverse=True)
 
@@ -58,25 +57,13 @@ class Retriever:
             raise RuntimeError(f"retrieval boundary violation: {leaked_ids}")
         return sources
 
-    def _cosine(self, left: list[float], right: list[float]) -> float:
-        if not left or not right or len(left) != len(right):
-            return 0.0
-        dot = sum(a * b for a, b in zip(left, right))
-        left_norm = math.sqrt(sum(a * a for a in left))
-        right_norm = math.sqrt(sum(b * b for b in right))
-        if left_norm == 0 or right_norm == 0:
-            return 0.0
-        return dot / (left_norm * right_norm)
-
     def _score(
         self,
         *,
         query: str,
-        query_embedding: list[float],
+        vector_score: float,
         text: str,
-        text_embedding: list[float],
     ) -> dict[str, float]:
-        vector_score = max(0.0, self._cosine(query_embedding, text_embedding))
         lexical_score = self._lexical_overlap(query, text)
         return {
             "score": vector_score + lexical_score,
@@ -97,3 +84,8 @@ class Retriever:
         chars = set(compact)
         words = {word.lower() for word in text.replace("\n", " ").split() if word.strip()}
         return chars | char_grams | words
+
+    def _is_allowed(self, required_tags: list[str], user_tags: set[str]) -> bool:
+        if not required_tags:
+            return True
+        return set(required_tags).issubset(user_tags)

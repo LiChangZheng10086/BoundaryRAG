@@ -119,7 +119,7 @@ async def test_document_delete_and_reindex(service: RagService) -> None:
     documents = service.list_documents(kb_id="kb_docs")
     assert documents[0].chunk_count > 0
 
-    service.store.replace_document_chunks(kb_id="kb_docs", document_id=document.id, chunks=[])
+    service.chunk_store.replace_document_chunks(kb_id="kb_docs", document_id=document.id, chunks=[])
     assert service.list_documents(kb_id="kb_docs")[0].chunk_count == 0
 
     reindexed = await service.reindex_document(kb_id="kb_docs", document_id=document.id)
@@ -127,7 +127,29 @@ async def test_document_delete_and_reindex(service: RagService) -> None:
 
     service.delete_document(kb_id="kb_docs", document_id=document.id)
     assert service.list_documents(kb_id="kb_docs") == []
-    assert service.store.list_chunks(kb_id="kb_docs") == []
+    assert service.chunk_store.list_chunks(kb_id="kb_docs") == []
+
+
+@pytest.mark.asyncio
+async def test_chunks_are_stored_in_local_milvus_lite(tmp_path: Path) -> None:
+    service = RagService(
+        store=JsonStore(tmp_path),
+        embeddings=LocalHashEmbeddingProvider(),
+        llm=LocalBoundaryLLMProvider(),
+        artifact_dir=tmp_path / "artifacts",
+    )
+    service.create_knowledge_base(KnowledgeBaseCreate(id="kb_milvus", name="Milvus 向量库"))
+
+    await service.add_document(
+        kb_id="kb_milvus",
+        data=DocumentIn(title="Milvus 文档", content="Milvus Lite 应该保存本地 chunk 向量。"),
+    )
+
+    chunks = service.chunk_store.list_chunks(kb_id="kb_milvus")
+    assert chunks
+    assert chunks[0].embedding
+    assert (tmp_path / "milvus_lite.db").exists()
+    assert not (tmp_path / "chunks.json").exists()
 
 
 @pytest.mark.asyncio
@@ -269,7 +291,7 @@ async def test_embedding_count_mismatch_fails_without_partial_index(tmp_path: Pa
     assert documents[0].status == "failed"
     assert "embedding provider returned" in documents[0].error
     assert documents[0].chunk_count == 0
-    assert service.store.list_chunks(kb_id="kb_bad_embeddings") == []
+    assert service.chunk_store.list_chunks(kb_id="kb_bad_embeddings") == []
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,13 @@ class JsonStore:
             self._write_json("documents.json", items)
         return document
 
-    def list_documents(self, *, kb_id: str, permission_tags: list[str] | None = None) -> list[DocumentSummary]:
+    def list_documents(
+        self,
+        *,
+        kb_id: str,
+        permission_tags: list[str] | None = None,
+        chunk_counts: dict[str, int] | None = None,
+    ) -> list[DocumentSummary]:
         enforce_permissions = permission_tags is not None
         user_tags = set(permission_tags or [])
         documents = [
@@ -45,10 +51,7 @@ class JsonStore:
             if item["knowledge_base_id"] == kb_id
             and (not enforce_permissions or self._is_allowed(item.get("permission_tags", []), user_tags))
         ]
-        chunks = self.list_chunks(kb_id=kb_id)
-        chunk_counts: dict[str, int] = {}
-        for chunk in chunks:
-            chunk_counts[chunk.document_id] = chunk_counts.get(chunk.document_id, 0) + 1
+        chunk_counts = chunk_counts or {}
 
         return [
             DocumentSummary(
@@ -114,33 +117,8 @@ class JsonStore:
             if len(remaining_documents) == len(documents):
                 return False
 
-            chunks = self._read_json("chunks.json", [])
-            remaining_chunks = [
-                item
-                for item in chunks
-                if not (item["knowledge_base_id"] == kb_id and item["document_id"] == document_id)
-            ]
             self._write_json("documents.json", remaining_documents)
-            self._write_json("chunks.json", remaining_chunks)
             return True
-
-    def add_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
-        with self._lock:
-            items = self._read_json("chunks.json", [])
-            items.extend(chunk.model_dump() for chunk in chunks)
-            self._write_json("chunks.json", items)
-        return chunks
-
-    def replace_document_chunks(self, *, kb_id: str, document_id: str, chunks: list[Chunk]) -> list[Chunk]:
-        with self._lock:
-            items = [
-                item
-                for item in self._read_json("chunks.json", [])
-                if not (item["knowledge_base_id"] == kb_id and item["document_id"] == document_id)
-            ]
-            items.extend(chunk.model_dump() for chunk in chunks)
-            self._write_json("chunks.json", items)
-        return chunks
 
     def add_artifact(self, artifact: ArtifactRecord) -> ArtifactRecord:
         with self._lock:
@@ -182,22 +160,15 @@ class JsonStore:
             self._write_json("artifacts.json", remaining_artifacts)
             return True
 
-    def list_chunks(
-        self,
-        *,
-        kb_id: str,
-        tenant_id: str | None = None,
-        permission_tags: list[str] | None = None,
-    ) -> list[Chunk]:
-        enforce_permissions = permission_tags is not None
-        user_tags = set(permission_tags or [])
-        return [
-            Chunk.model_validate(item)
-            for item in self._read_json("chunks.json", [])
-            if item["knowledge_base_id"] == kb_id
-            and (tenant_id is None or item.get("tenant_id", "default") == tenant_id)
-            and (not enforce_permissions or self._is_allowed(item.get("permission_tags", []), user_tags))
-        ]
+    def read_legacy_chunks(self) -> list[Chunk]:
+        return [Chunk.model_validate(item) for item in self._read_json("chunks.json", [])]
+
+    def mark_legacy_chunks_migrated(self) -> None:
+        path = self.data_dir / "chunks.json"
+        if not path.exists():
+            return
+        migrated_path = self.data_dir / "chunks.json.migrated"
+        path.replace(migrated_path)
 
     def _is_allowed(self, required_tags: list[str], user_tags: set[str]) -> bool:
         if not required_tags:

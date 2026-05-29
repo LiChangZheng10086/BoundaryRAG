@@ -275,6 +275,7 @@ function renderModelStatus() {
   const embeddingReady = config.embedding_ready ? "ready" : "missing key";
   els.modelStatus.className = `model-status ${config.llm_provider === "deepseek" && config.llm_ready ? "ready" : "warn"}`;
   els.modelStatus.textContent = [
+    `Vector: ${config.vector_store || "milvus-lite"} / ${config.vector_store_collection || "boundaryrag_chunks"}`,
     `LLM: ${config.llm_provider} / ${config.llm_model} / ${llmReady}`,
     `Embedding: ${config.embedding_provider} / ${config.embedding_model} / ${embeddingReady}`,
   ].join(" · ");
