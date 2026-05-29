@@ -15,13 +15,14 @@ from rag_demo.models import (
     DocumentSummary,
     KnowledgeBase,
     KnowledgeBaseCreate,
+    OperationEvent,
     QueryResponse,
     ReindexResponse,
     SkillResponse,
 )
 from rag_demo.retriever import Retriever
 from rag_demo.skills import SkillRegistry
-from rag_demo.store import JsonStore
+from rag_demo.store import JsonStore, SqliteStore
 from rag_demo.vector_store import ChunkStore, create_chunk_store
 from pathlib import Path
 
@@ -35,7 +36,7 @@ class RagService:
     def __init__(
         self,
         *,
-        store: JsonStore,
+        store: JsonStore | SqliteStore,
         chunk_store: ChunkStore | None = None,
         embeddings: EmbeddingProvider,
         llm: LLMProvider,
@@ -341,6 +342,23 @@ class RagService:
             for record in records
             if record.tenant_id == access.tenant_id and record.user_id == access.user_id
         ]
+
+    def list_operation_events(
+        self,
+        *,
+        access: AccessContext | None = None,
+        kb_id: str | None = None,
+        limit: int = 100,
+    ) -> list[OperationEvent]:
+        access = access or AccessContext()
+        safe_limit = max(1, min(limit, 200))
+        events = self.store.list_operation_events(limit=safe_limit)
+        return [
+            event
+            for event in events
+            if event.tenant_id in {"", access.tenant_id}
+            and (not event.knowledge_base_id or not kb_id or event.knowledge_base_id == kb_id)
+        ][:safe_limit]
 
     def get_artifact_file(
         self,

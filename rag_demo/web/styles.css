@@ -45,6 +45,30 @@ select {
   font: inherit;
 }
 
+.skill-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.skill-checks label {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 0.65rem 0.75rem;
+  color: var(--moss-dark);
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.skill-checks input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--moss);
+}
+
 button {
   border: 0;
   border-radius: 999px;
@@ -206,6 +230,10 @@ label {
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 1rem;
+}
+
+.section-head.compact {
+  margin-bottom: 0.75rem;
 }
 
 h2 {
@@ -584,6 +612,31 @@ mark {
   color: var(--muted);
   line-height: 1.65;
   margin: 0.55rem 0 0;
+}
+
+.setting-tile-wide {
+  grid-column: 1 / -1;
+}
+
+.operation-list {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.operation-item {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 0.75rem;
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.operation-item strong {
+  display: block;
+  color: var(--ink);
+}
+
+.operation-item span {
+  margin: 0.25rem 0 0;
 }
 
 .toast {

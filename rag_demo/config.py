@@ -14,6 +14,7 @@ load_dotenv()
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_DATA_DIR", ".rag_data")))
     artifact_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_ARTIFACT_DIR", ".rag_data/artifacts")))
+    sqlite_path: Path = field(default_factory=lambda: Path(os.getenv("RAG_SQLITE_PATH", ".rag_data/boundaryrag.sqlite3")))
     milvus_uri: Path = field(default_factory=lambda: Path(os.getenv("RAG_MILVUS_URI", ".rag_data/milvus_lite.db")))
     milvus_collection: str = field(default_factory=lambda: os.getenv("RAG_MILVUS_COLLECTION", "boundaryrag_chunks"))
     max_upload_bytes: int = field(default_factory=lambda: int(os.getenv("RAG_MAX_UPLOAD_MB", "25")) * 1024 * 1024)

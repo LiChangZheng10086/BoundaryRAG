@@ -3,6 +3,7 @@ const state = {
   activeKb: null,
   documents: [],
   artifacts: [],
+  operationEvents: [],
   runtimeConfig: null,
   activeTab: "ask",
   authToken: window.localStorage.getItem("rag_demo_auth_token") || "",
@@ -11,6 +12,7 @@ const state = {
     knowledgeBases: 0,
     documents: 0,
     artifacts: 0,
+    operationEvents: 0,
     query: 0,
     generate: 0,
   },
@@ -81,10 +83,12 @@ const els = {
   sidebarBoundaryMeta: $("sidebarBoundaryMeta"),
   operationStatus: $("operationStatus"),
   operationStatusText: $("operationStatusText"),
+  operationList: $("operationList"),
   tokenExpiry: $("tokenExpiry"),
   documentPreview: $("documentPreview"),
   reloadDocsBtn: $("reloadDocsBtn"),
   reloadArtifactsBtn: $("reloadArtifactsBtn"),
+  reloadOperationsBtn: $("reloadOperationsBtn"),
   refreshBtn: $("refreshBtn"),
   skillForm: $("skillForm"),
   skillName: $("skillName"),
@@ -167,7 +171,7 @@ function requireActiveKb() {
 }
 
 function selectedSkills() {
-  return Array.from(els.kbSkills.selectedOptions).map((option) => option.value);
+  return Array.from(els.kbSkills.querySelectorAll("input[type='checkbox']:checked")).map((input) => input.value);
 }
 
 function parseTags(value) {
@@ -275,6 +279,7 @@ function renderModelStatus() {
   const embeddingReady = config.embedding_ready ? "ready" : "missing key";
   els.modelStatus.className = `model-status ${config.llm_provider === "deepseek" && config.llm_ready ? "ready" : "warn"}`;
   els.modelStatus.textContent = [
+    `Metadata: ${config.metadata_store || "sqlite"} / ${config.metadata_store_uri || ".rag_data/boundaryrag.sqlite3"}`,
     `Vector: ${config.vector_store || "milvus-lite"} / ${config.vector_store_collection || "boundaryrag_chunks"}`,
     `LLM: ${config.llm_provider} / ${config.llm_model} / ${llmReady}`,
     `Embedding: ${config.embedding_provider} / ${config.embedding_model} / ${embeddingReady}`,
@@ -354,6 +359,7 @@ function renderKnowledgeBases() {
       els.generateArtifactBox.innerHTML = "";
       loadDocuments().catch((error) => showToast(error.message));
       loadArtifacts().catch((error) => showToast(error.message));
+      loadOperationEvents().catch((error) => showToast(error.message));
       setOperationStatus(`已切换到 ${kb.name}，边界已锁定。`);
       renderAll();
     });
@@ -564,11 +570,34 @@ function renderArtifacts() {
   }
 }
 
+function renderOperationEvents() {
+  els.operationList.innerHTML = "";
+
+  if (!state.operationEvents.length) {
+    els.operationList.textContent = state.activeKb
+      ? "当前知识库暂无操作记录。"
+      : "选择知识库后会显示操作记录。";
+    return;
+  }
+
+  for (const event of state.operationEvents) {
+    const item = document.createElement("div");
+    item.className = "operation-item";
+    item.innerHTML = `
+      <strong>${escapeHtml(event.event_type)}</strong>
+      <span>${escapeHtml(event.message || "无说明")} · ${escapeHtml(formatTime(event.created_at))}</span>
+      <small>${escapeHtml([event.knowledge_base_id, event.document_id, event.artifact_id].filter(Boolean).join(" / ") || "-")}</small>
+    `;
+    els.operationList.appendChild(item);
+  }
+}
+
 function renderAll() {
   renderKnowledgeBases();
   renderBoundary();
   renderDocuments();
   renderArtifacts();
+  renderOperationEvents();
   renderTabs();
 }
 
@@ -626,6 +655,22 @@ async function loadArtifacts() {
   }
   state.artifacts = artifacts;
   renderArtifacts();
+}
+
+async function loadOperationEvents() {
+  if (!state.activeKb) {
+    state.operationEvents = [];
+    renderOperationEvents();
+    return;
+  }
+  const kbId = state.activeKb.id;
+  const requestId = ++state.requests.operationEvents;
+  const events = await api(`/operation-events?kb_id=${encodeURIComponent(kbId)}&limit=20`);
+  if (requestId !== state.requests.operationEvents || state.activeKb?.id !== kbId) {
+    return;
+  }
+  state.operationEvents = events;
+  renderOperationEvents();
 }
 
 async function downloadArtifact(artifact) {
@@ -807,7 +852,12 @@ document.querySelectorAll("[data-tab]").forEach((button) => {
 });
 
 els.refreshBtn.addEventListener("click", () => {
-  loadKnowledgeBases().then(() => showToast("知识库列表已刷新。")).catch((error) => showToast(error.message));
+  loadKnowledgeBases()
+    .then(loadDocuments)
+    .then(loadArtifacts)
+    .then(loadOperationEvents)
+    .then(() => showToast("知识库列表已刷新。"))
+    .catch((error) => showToast(error.message));
 });
 
 els.kbSearch.addEventListener("input", renderKnowledgeBases);
@@ -850,6 +900,9 @@ els.kbForm.addEventListener("submit", (event) => {
       permission_tags: parseTags(els.kbPermissionTags.value),
       allowed_skills: selectedSkills(),
     };
+    if (!payload.allowed_skills.length) {
+      throw new Error("请至少选择一个允许技能。");
+    }
     const kb = await api("/knowledge-bases", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -861,6 +914,7 @@ els.kbForm.addEventListener("submit", (event) => {
     await loadKnowledgeBases();
     await loadDocuments();
     await loadArtifacts();
+    await loadOperationEvents();
     showToast("知识库已创建，并切换为当前边界。");
   });
 });
@@ -880,6 +934,7 @@ els.docForm.addEventListener("submit", (event) => {
     });
     els.docForm.reset();
     await loadDocuments();
+    await loadOperationEvents();
     setOperationStatus("文本已入库并完成索引。");
     showToast(`文档已写入 ${kb.name}。`);
   });
@@ -912,16 +967,29 @@ els.uploadForm.addEventListener("submit", (event) => {
     setOperationStatus("文件已解析并完成向量化。");
     els.uploadForm.reset();
     await loadDocuments();
+    await loadOperationEvents();
     showToast(`文件已上传并写入 ${kb.name}。`);
   });
 });
 
 els.reloadDocsBtn.addEventListener("click", () => {
-  loadDocuments().then(() => showToast("文档列表已刷新。")).catch((error) => showToast(error.message));
+  loadDocuments()
+    .then(loadOperationEvents)
+    .then(() => showToast("文档列表已刷新。"))
+    .catch((error) => showToast(error.message));
 });
 
 els.reloadArtifactsBtn.addEventListener("click", () => {
-  loadArtifacts().then(() => showToast("生成历史已刷新。")).catch((error) => showToast(error.message));
+  loadArtifacts()
+    .then(loadOperationEvents)
+    .then(() => showToast("生成历史已刷新。"))
+    .catch((error) => showToast(error.message));
+});
+
+els.reloadOperationsBtn.addEventListener("click", () => {
+  loadOperationEvents()
+    .then(() => showToast("操作记录已刷新。"))
+    .catch((error) => showToast(error.message));
 });
 
 els.skillName.addEventListener("change", renderBoundary);
@@ -942,6 +1010,7 @@ els.saveAuthTokenBtn.addEventListener("click", () => {
   }
   renderBoundary();
   loadKnowledgeBases().catch((error) => showToast(error.message));
+  loadOperationEvents().catch((error) => showToast(error.message));
 });
 
 els.clearAuthTokenBtn.addEventListener("click", () => {
@@ -952,6 +1021,7 @@ els.clearAuthTokenBtn.addEventListener("click", () => {
   showToast("JWT Token 已清除，将使用 demo 请求头。");
   renderBoundary();
   loadKnowledgeBases().catch((error) => showToast(error.message));
+  loadOperationEvents().catch((error) => showToast(error.message));
 });
 
 els.documentList.addEventListener("click", (event) => {
@@ -987,6 +1057,7 @@ els.documentList.addEventListener("click", (event) => {
       await previewDocument(docId);
     }
     await loadDocuments();
+    await loadOperationEvents();
   });
 });
 
@@ -1016,6 +1087,7 @@ els.artifactList.addEventListener("click", (event) => {
     if (button.dataset.artifactAction === "delete") {
       await deleteArtifact(artifact);
     }
+    await loadOperationEvents();
   });
 });
 
@@ -1054,6 +1126,7 @@ els.queryForm.addEventListener("submit", (event) => {
     renderResult(result, { queryText: state.lastQueryText });
     setOperationStatus("问答完成，来源已更新。");
     showToast("已在当前知识库内完成问答。");
+    await loadOperationEvents();
   });
 });
 
@@ -1062,6 +1135,7 @@ els.skillForm.addEventListener("submit", (event) => {
   handleSubmit(els.skillForm, async () => {
     const skillName = els.skillName.value;
     await executeSkill(skillName, els.instruction.value.trim());
+    await loadOperationEvents();
   });
 });
 
@@ -1069,4 +1143,5 @@ loadRuntimeConfig()
   .then(loadKnowledgeBases)
   .then(loadDocuments)
   .then(loadArtifacts)
+  .then(loadOperationEvents)
   .catch((error) => showToast(error.message));

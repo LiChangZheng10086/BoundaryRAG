@@ -173,8 +173,23 @@ class ArtifactPreview(BaseModel):
     content: str
 
 
+class OperationEvent(BaseModel):
+    id: str = Field(default_factory=lambda: f"op_{uuid4().hex}")
+    event_type: str
+    user_id: str = "system"
+    tenant_id: str = "default"
+    knowledge_base_id: str = ""
+    document_id: str = ""
+    artifact_id: str = ""
+    message: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=utc_now)
+
+
 class RuntimeConfig(BaseModel):
     auth_mode: str
+    metadata_store: str
+    metadata_store_uri: str
     vector_store: str
     vector_store_uri: str
     vector_store_collection: str

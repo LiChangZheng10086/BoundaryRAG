@@ -17,8 +17,8 @@
 - 认证：Demo Header / JWT(HS256)
 - 向量化：DashScope `MultiModalEmbedding` 或本地 hash embedding
 - 大模型：DeepSeek Chat Completions 或本地 boundary LLM
+- 业务存储：SQLite 本地数据库
 - 向量存储：Milvus Lite 本地文件模式
-- 业务存储：JSON 文件
 - 文件解析：python-docx、python-pptx
 - 前端：原生 HTML / CSS / JavaScript
 - 测试：pytest、pytest-asyncio
@@ -76,11 +76,18 @@ flowchart LR
 
 ### 业务元数据
 
-使用 `.rag_data/*.json` 保存：
+使用本地 SQLite 保存：
 
-- `knowledge_bases.json`
-- `documents.json`
-- `artifacts.json`
+```text
+.rag_data/boundaryrag.sqlite3
+```
+
+表包括：
+
+- `knowledge_bases`
+- `documents`
+- `artifacts`
+- `operation_events`
 
 ### 向量索引
 
@@ -97,6 +104,7 @@ boundaryrag_chunks
 ```
 
 旧版本如果有 `chunks.json`，启动时会自动迁移到 Milvus Lite。
+旧版 JSON 业务数据也会自动导入 SQLite，作为本地迁移路径。
 
 ## 本地启动
 
@@ -142,6 +150,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 RAG_DATA_DIR=.rag_data
 RAG_ARTIFACT_DIR=.rag_data/artifacts
+RAG_SQLITE_PATH=.rag_data/boundaryrag.sqlite3
 RAG_MILVUS_URI=.rag_data/milvus_lite.db
 RAG_MILVUS_COLLECTION=boundaryrag_chunks
 RAG_MAX_DOCUMENT_CHARS=200000
@@ -261,6 +270,6 @@ pytest -q
 
 ## 说明
 
-- 这个项目的定位是 MVP，但向量层已经规范化为本地 Milvus Lite
-- 如果后续要上生产，可以把 JSON 业务存储进一步替换为数据库
+- 这个项目的定位是 MVP，但业务数据已经实体化到 SQLite
+- 向量层已经规范化为本地 Milvus Lite
 - 如果你想继续扩展，我建议下一步做 rerank、流式输出和后台索引队列

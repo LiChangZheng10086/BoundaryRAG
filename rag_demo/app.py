@@ -20,6 +20,7 @@ from rag_demo.models import (
     DocumentSummary,
     KnowledgeBase,
     KnowledgeBaseCreate,
+    OperationEvent,
     QueryRequest,
     QueryResponse,
     ReindexResponse,
@@ -28,7 +29,7 @@ from rag_demo.models import (
     SkillResponse,
 )
 from rag_demo.service import RagService
-from rag_demo.store import JsonStore
+from rag_demo.store import SqliteStore
 from rag_demo.vector_store import create_chunk_store
 
 
@@ -79,7 +80,7 @@ async def index() -> FileResponse:
 @lru_cache
 def get_service() -> RagService:
     settings = get_settings()
-    store = JsonStore(settings.data_dir)
+    store = SqliteStore(settings.sqlite_path, legacy_data_dir=settings.data_dir)
     chunk_store = create_chunk_store(uri=settings.milvus_uri, collection_name=settings.milvus_collection)
     legacy_chunks = store.read_legacy_chunks()
     if legacy_chunks:
@@ -113,6 +114,8 @@ async def runtime_config() -> RuntimeConfig:
     settings = get_settings()
     return RuntimeConfig(
         auth_mode=settings.auth_mode,
+        metadata_store="sqlite",
+        metadata_store_uri=str(settings.sqlite_path),
         vector_store="milvus-lite",
         vector_store_uri=str(settings.milvus_uri),
         vector_store_collection=settings.milvus_collection,
@@ -391,3 +394,16 @@ async def list_artifacts(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/operation-events", response_model=list[OperationEvent])
+async def list_operation_events(
+    limit: int = 50,
+    kb_id: str | None = None,
+    access: AccessContext = Depends(get_access_context),
+    service: RagService = Depends(get_service),
+) -> list[OperationEvent]:
+    try:
+        return service.list_operation_events(access=access, kb_id=kb_id, limit=limit)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

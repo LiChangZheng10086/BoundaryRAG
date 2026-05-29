@@ -66,13 +66,14 @@
               </label>
               <label>
                 允许技能
-                <select id="kbSkills" multiple>
-                  <option value="answer_question" selected>问答</option>
-                  <option value="write_document" selected>写文档</option>
-                  <option value="write_markdown" selected>写 Markdown</option>
-                  <option value="write_word" selected>写 Word</option>
-                  <option value="write_ppt" selected>写 PPT</option>
-                </select>
+                <div id="kbSkills" class="skill-checks" role="group" aria-label="允许技能">
+                  <label><input type="checkbox" value="answer_question" checked />问答</label>
+                  <label><input type="checkbox" value="write_document" checked />写文档</label>
+                  <label><input type="checkbox" value="write_markdown" checked />写 Markdown</label>
+                  <label><input type="checkbox" value="write_word" checked />写 Word</label>
+                  <label><input type="checkbox" value="write_ppt" checked />写 PPT</label>
+                </div>
+                <small class="field-hint">可多选。未勾选的技能在该知识库内不可执行。</small>
               </label>
               <button type="submit">创建知识库</button>
             </form>
@@ -96,11 +97,11 @@
             </div>
           </div>
 
-          <nav class="tabs" aria-label="工作区导航">
-            <button class="tab active" data-tab="ask" type="button">问答</button>
-            <button class="tab" data-tab="documents" type="button">文档</button>
-            <button class="tab" data-tab="generate" type="button">生成</button>
-            <button class="tab" data-tab="settings" type="button">设置</button>
+          <nav class="tabs" aria-label="工作区导航" role="tablist">
+            <button id="tab-ask" class="tab active" data-tab="ask" type="button" role="tab" aria-selected="true" aria-controls="panel-ask">问答</button>
+            <button id="tab-documents" class="tab" data-tab="documents" type="button" role="tab" aria-selected="false" aria-controls="panel-documents">文档</button>
+            <button id="tab-generate" class="tab" data-tab="generate" type="button" role="tab" aria-selected="false" aria-controls="panel-generate">生成</button>
+            <button id="tab-settings" class="tab" data-tab="settings" type="button" role="tab" aria-selected="false" aria-controls="panel-settings">设置</button>
           </nav>
 
           <div id="operationStatus" class="operation-status" role="status" aria-live="polite">
@@ -108,7 +109,7 @@
             <span id="operationStatusText">准备就绪。选择知识库后开始工作。</span>
           </div>
 
-          <section class="tab-panel active" data-panel="ask">
+          <section id="panel-ask" class="tab-panel active" data-panel="ask" role="tabpanel" aria-labelledby="tab-ask">
             <article class="panel card">
               <div class="section-head">
                 <div>
@@ -140,7 +141,7 @@
 	            </article>
 	          </section>
 
-          <section class="tab-panel" data-panel="documents">
+          <section id="panel-documents" class="tab-panel" data-panel="documents" role="tabpanel" aria-labelledby="tab-documents">
             <div class="cards">
             <article class="panel card">
               <div class="section-head">
@@ -229,7 +230,7 @@
           </article>
           </section>
 
-          <section class="tab-panel" data-panel="generate">
+          <section id="panel-generate" class="tab-panel" data-panel="generate" role="tabpanel" aria-labelledby="tab-generate">
           <article class="panel card">
             <div class="section-head">
               <div>
@@ -291,7 +292,7 @@
 	          </article>
 	          </section>
 
-          <section class="tab-panel" data-panel="settings">
+          <section id="panel-settings" class="tab-panel" data-panel="settings" role="tabpanel" aria-labelledby="tab-settings">
             <article class="panel card">
               <div class="section-head">
                 <div>
@@ -325,6 +326,16 @@
                   <span>当前知识库</span>
                   <strong id="settingsKnowledgeBase">未选择</strong>
                   <p id="settingsKnowledgeBaseMeta">选择知识库后会显示租户、技能和权限标签。</p>
+                </div>
+                <div class="setting-tile setting-tile-wide">
+                  <div class="section-head compact">
+                    <div>
+                      <span>最近操作</span>
+                      <strong>SQLite 操作记录</strong>
+                    </div>
+                    <button id="reloadOperationsBtn" class="ghost" type="button">刷新记录</button>
+                  </div>
+                  <div id="operationList" class="operation-list">暂无操作记录。</div>
                 </div>
               </div>
             </article>

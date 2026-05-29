@@ -6,9 +6,10 @@ import pytest
 
 from rag_demo.embeddings import LocalHashEmbeddingProvider
 from rag_demo.llm import LocalBoundaryLLMProvider
-from rag_demo.models import AccessContext, DocumentIn, KnowledgeBaseCreate
+from rag_demo.models import AccessContext, ArtifactRecord, Chunk, Document, DocumentIn, KnowledgeBase, KnowledgeBaseCreate
 from rag_demo.service import RagService
-from rag_demo.store import JsonStore
+from rag_demo.store import JsonStore, SqliteStore
+from rag_demo.vector_store import create_chunk_store
 
 
 @pytest.fixture
@@ -150,6 +151,92 @@ async def test_chunks_are_stored_in_local_milvus_lite(tmp_path: Path) -> None:
     assert chunks[0].embedding
     assert (tmp_path / "milvus_lite.db").exists()
     assert not (tmp_path / "chunks.json").exists()
+
+
+def test_milvus_lite_stores_mixed_embedding_dimensions_in_separate_collections(tmp_path: Path) -> None:
+    chunk_store = create_chunk_store(uri=tmp_path / "milvus_lite.db", collection_name="test_chunks")
+    chunks = [
+        Chunk(
+            id="chunk_dim2",
+            knowledge_base_id="kb_mixed",
+            document_id="doc_dim2",
+            title="二维向量",
+            text="二维向量内容",
+            embedding=[1.0, 0.0],
+        ),
+        Chunk(
+            id="chunk_dim3",
+            knowledge_base_id="kb_mixed",
+            document_id="doc_dim3",
+            title="三维向量",
+            text="三维向量内容",
+            embedding=[1.0, 0.0, 0.0],
+        ),
+    ]
+
+    chunk_store.upsert_chunks(chunks)
+
+    assert {chunk.id for chunk in chunk_store.list_chunks(kb_id="kb_mixed")} == {"chunk_dim2", "chunk_dim3"}
+    matches = chunk_store.search_chunks(
+        kb_id="kb_mixed",
+        tenant_id="default",
+        query_embedding=[1.0, 0.0],
+        limit=5,
+    )
+    assert [match.chunk.id for match in matches] == ["chunk_dim2"]
+
+
+def test_sqlite_store_migrates_legacy_json_metadata(tmp_path: Path) -> None:
+    legacy = JsonStore(tmp_path)
+    legacy.create_knowledge_base(
+        KnowledgeBase(
+            id="kb_legacy",
+            name="旧数据知识库",
+            allowed_skills=["answer_question", "write_document"],
+        )
+    )
+    legacy.add_document(
+        Document(
+            id="doc_legacy",
+            knowledge_base_id="kb_legacy",
+            title="旧文档",
+            content="旧 JSON 文档内容",
+        )
+    )
+    legacy.add_artifact(
+        ArtifactRecord(
+            id="artifact_legacy",
+            knowledge_base_id="kb_legacy",
+            filename="legacy.md",
+            media_type="text/markdown",
+            skill="write_markdown",
+        )
+    )
+
+    store = SqliteStore(tmp_path / "boundaryrag.sqlite3", legacy_data_dir=tmp_path)
+
+    assert store.get_knowledge_base("kb_legacy") is not None
+    assert store.get_document(kb_id="kb_legacy", document_id="doc_legacy") is not None
+    assert store.get_artifact(kb_id="kb_legacy", artifact_id="artifact_legacy") is not None
+    assert any(event.event_type == "storage.legacy_json_imported" for event in store.list_operation_events())
+
+
+@pytest.mark.asyncio
+async def test_sqlite_store_persists_operation_events(tmp_path: Path) -> None:
+    store = SqliteStore(tmp_path / "boundaryrag.sqlite3")
+    service = RagService(
+        store=store,
+        embeddings=LocalHashEmbeddingProvider(),
+        llm=LocalBoundaryLLMProvider(),
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    service.create_knowledge_base(KnowledgeBaseCreate(id="kb_ops", name="操作记录库"))
+    await service.add_document(kb_id="kb_ops", data=DocumentIn(title="操作文档", content="操作记录应该落库。"))
+
+    events = store.list_operation_events(limit=20)
+    event_types = {event.event_type for event in events}
+    assert {"knowledge_base.created", "document.created", "document.indexed"}.issubset(event_types)
 
 
 @pytest.mark.asyncio
