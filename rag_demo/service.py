@@ -82,6 +82,19 @@ class RagService:
             and (not kb.permission_tags or set(kb.permission_tags).issubset(set(access.permission_tags)))
         ]
 
+    def delete_knowledge_base(self, *, kb_id: str, access: AccessContext | None = None) -> None:
+        access = access or AccessContext()
+        kb = self._require_kb(kb_id, access=access)
+        artifacts = self.store.list_artifacts(kb_id=kb.id, permission_tags=None)
+        deleted = self.store.delete_knowledge_base(kb.id)
+        if not deleted:
+            raise KeyError(f"knowledge base '{kb_id}' does not exist")
+        self.chunk_store.delete_knowledge_base_chunks(kb_id=kb.id)
+        for artifact in artifacts:
+            path = self.artifact_dir / artifact.filename
+            if path.exists():
+                path.unlink()
+
     async def add_document(
         self,
         *,

@@ -24,6 +24,9 @@ class ChunkStore(Protocol):
     def delete_document_chunks(self, *, kb_id: str, document_id: str) -> None:
         raise NotImplementedError
 
+    def delete_knowledge_base_chunks(self, *, kb_id: str) -> None:
+        raise NotImplementedError
+
     def list_chunks(
         self,
         *,
@@ -115,6 +118,14 @@ class MilvusChunkStore:
             )
             self._flush(collection_name)
 
+    def delete_knowledge_base_chunks(self, *, kb_id: str) -> None:
+        for collection_name in self._active_collection_names():
+            self._client.delete(
+                collection_name=collection_name,
+                filter=f"knowledge_base_id == {self._literal(kb_id)}",
+            )
+            self._flush(collection_name)
+
     def list_chunks(
         self,
         *,
@@ -127,7 +138,11 @@ class MilvusChunkStore:
             rows.extend(
                 self._query_rows(
                     collection_name,
-                    self._filter_expression(kb_id=kb_id, tenant_id=tenant_id),
+                    self._filter_expression(
+                        collection_name=collection_name,
+                        kb_id=kb_id,
+                        tenant_id=tenant_id,
+                    ),
                     output_fields=self._OUTPUT_FIELDS,
                 )
             )
@@ -164,13 +179,18 @@ class MilvusChunkStore:
             return []
         matches: list[ChunkSearchMatch] = []
         for collection_name in collection_names:
+            self._ensure_loaded(collection_name)
             results = self._client.search(
                 collection_name=collection_name,
                 data=[query_embedding],
                 anns_field=self._VECTOR_FIELD,
-                filter=self._filter_expression(kb_id=kb_id, tenant_id=tenant_id),
+                filter=self._filter_expression(
+                    collection_name=collection_name,
+                    kb_id=kb_id,
+                    tenant_id=tenant_id,
+                ),
                 limit=limit,
-                output_fields=self._OUTPUT_FIELDS,
+                output_fields=self._output_fields_for_collection(collection_name, self._OUTPUT_FIELDS),
             )
             for hit in results[0] if results else []:
                 entity = dict(hit.get("entity") or {})
@@ -229,11 +249,12 @@ class MilvusChunkStore:
         return self._client.has_collection(collection_name=collection_name)
 
     def _query_rows(self, collection_name: str, filter_expression: str, *, output_fields: list[str]) -> list[dict]:
+        self._ensure_loaded(collection_name)
         return list(
             self._client.query(
                 collection_name=collection_name,
                 filter=filter_expression,
-                output_fields=output_fields,
+                output_fields=self._output_fields_for_collection(collection_name, output_fields),
             )
         )
 
@@ -258,22 +279,43 @@ class MilvusChunkStore:
     def _row_to_chunk(self, row: dict) -> Chunk:
         return Chunk(
             id=row["id"],
-            knowledge_base_id=row["knowledge_base_id"],
-            document_id=row["document_id"],
-            title=row["title"],
-            text=row["text"],
+            knowledge_base_id=row.get("knowledge_base_id") or "",
+            document_id=row.get("document_id") or "",
+            title=row.get("title") or "",
+            text=row.get("text") or "",
             metadata=self._json_loads(row.get("metadata_json") or "{}", {}),
             tenant_id=row.get("tenant_id") or "default",
             permission_tags=self._json_loads(row.get("permission_tags_json") or "[]", []),
             embedding=row.get("embedding") or [],
-            created_at=row["created_at"],
+            created_at=row.get("created_at") or "",
         )
 
-    def _filter_expression(self, *, kb_id: str, tenant_id: str | None = None) -> str:
-        expression = f"knowledge_base_id == {self._literal(kb_id)}"
-        if tenant_id is not None:
-            expression += f" and tenant_id == {self._literal(tenant_id)}"
-        return expression
+    def _filter_expression(
+        self,
+        *,
+        collection_name: str | None = None,
+        kb_id: str,
+        tenant_id: str | None = None,
+    ) -> str:
+        fields = self._collection_field_names(collection_name) if collection_name else set()
+        expression_parts: list[str] = []
+        if not fields or "knowledge_base_id" in fields:
+            expression_parts.append(f"knowledge_base_id == {self._literal(kb_id)}")
+        if tenant_id is not None and (not fields or "tenant_id" in fields):
+            expression_parts.append(f"tenant_id == {self._literal(tenant_id)}")
+        return " and ".join(expression_parts)
+
+    def _collection_field_names(self, collection_name: str | None) -> set[str]:
+        if not collection_name:
+            return set()
+        description = self._client.describe_collection(collection_name=collection_name)
+        return {field.get("name", "") for field in description.get("fields", []) if field.get("name")}
+
+    def _output_fields_for_collection(self, collection_name: str, output_fields: list[str]) -> list[str]:
+        fields = self._collection_field_names(collection_name)
+        if not fields:
+            return output_fields
+        return [field for field in output_fields if field in fields]
 
     def _literal(self, value: str) -> str:
         return json.dumps(value, ensure_ascii=False)
@@ -330,6 +372,10 @@ class MilvusChunkStore:
     def _flush(self, collection_name: str) -> None:
         if self._has_collection(collection_name):
             self._client.flush(collection_name=collection_name)
+
+    def _ensure_loaded(self, collection_name: str) -> None:
+        if self._has_collection(collection_name):
+            self._client.load_collection(collection_name=collection_name)
 
 
 def create_chunk_store(*, uri: Path | str, collection_name: str) -> MilvusChunkStore:

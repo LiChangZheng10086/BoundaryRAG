@@ -154,6 +154,22 @@ async def list_knowledge_bases(
     return service.list_knowledge_bases(access=access)
 
 
+@app.delete("/knowledge-bases/{kb_id}", status_code=204)
+async def delete_knowledge_base(
+    kb_id: str,
+    access: AccessContext = Depends(get_access_context),
+    service: RagService = Depends(get_service),
+) -> None:
+    try:
+        service.delete_knowledge_base(kb_id=kb_id, access=access)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @app.post("/knowledge-bases/{kb_id}/documents", response_model=Document)
 async def add_document(
     kb_id: str,

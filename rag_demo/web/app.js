@@ -336,15 +336,17 @@ function renderKnowledgeBases() {
   }
 
   for (const kb of filtered) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `kb-item ${state.activeKb?.id === kb.id ? "active" : ""}`;
+    const item = document.createElement("div");
+    item.className = `kb-item ${state.activeKb?.id === kb.id ? "active" : ""}`;
     const recentLabel = state.recentKbIds.includes(kb.id) ? " · 最近使用" : "";
-    button.innerHTML = `
-      <strong>${escapeHtml(kb.name)}</strong>
-      <small>${escapeHtml(kb.id)} · tenant ${escapeHtml(kb.tenant_id)}${recentLabel} · ${escapeHtml(kb.allowed_skills.join(", "))}</small>
+    item.innerHTML = `
+      <button class="kb-select" type="button">
+        <strong>${escapeHtml(kb.name)}</strong>
+        <small>${escapeHtml(kb.id)} · tenant ${escapeHtml(kb.tenant_id)}${recentLabel} · ${escapeHtml(kb.allowed_skills.join(", "))}</small>
+      </button>
+      <button class="kb-delete ghost" type="button" aria-label="删除 ${escapeHtml(kb.name)}">删除</button>
     `;
-    button.addEventListener("click", () => {
+    item.querySelector(".kb-select").addEventListener("click", () => {
       state.activeKb = kb;
       state.requests.query += 1;
       state.requests.generate += 1;
@@ -363,7 +365,33 @@ function renderKnowledgeBases() {
       setOperationStatus(`已切换到 ${kb.name}，边界已锁定。`);
       renderAll();
     });
-    els.kbList.appendChild(button);
+    item.querySelector(".kb-delete").addEventListener("click", (event) => {
+      handleButton(event.currentTarget, async () => {
+        const confirmed = window.confirm(`确认删除「${kb.name}」吗？该知识库下的文档、chunks 和生成记录都会删除。`);
+        if (!confirmed) {
+          return;
+        }
+        await api(`/knowledge-bases/${encodeURIComponent(kb.id)}`, { method: "DELETE" });
+        state.recentKbIds = state.recentKbIds.filter((id) => id !== kb.id);
+        window.localStorage.setItem("rag_demo_recent_kbs", JSON.stringify(state.recentKbIds));
+        if (state.activeKb?.id === kb.id) {
+          state.activeKb = null;
+          state.documents = [];
+          state.artifacts = [];
+          state.operationEvents = [];
+          els.answerBox.textContent = "问答结果会显示在这里。";
+          els.generateAnswerBox.textContent = "生成结果会显示在这里。";
+          els.documentPreview.textContent = "点击文档的“预览”查看解析后的入库文本。";
+          els.artifactPreview.textContent = "点击生成历史的“预览”查看文件内容。";
+        }
+        await loadKnowledgeBases();
+        await loadDocuments();
+        await loadArtifacts();
+        await loadOperationEvents();
+        showToast("知识库已删除。");
+      });
+    });
+    els.kbList.appendChild(item);
   }
 }
 
@@ -408,10 +436,14 @@ function renderBoundary() {
 
 function renderTabs() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.tab === state.activeTab);
+    const selected = button.dataset.tab === state.activeTab;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", selected ? "true" : "false");
   });
   document.querySelectorAll("[data-panel]").forEach((panel) => {
-    panel.classList.toggle("active", panel.dataset.panel === state.activeTab);
+    const selected = panel.dataset.panel === state.activeTab;
+    panel.classList.toggle("active", selected);
+    panel.toggleAttribute("hidden", !selected);
   });
 }
 
@@ -658,15 +690,13 @@ async function loadArtifacts() {
 }
 
 async function loadOperationEvents() {
-  if (!state.activeKb) {
-    state.operationEvents = [];
-    renderOperationEvents();
-    return;
-  }
-  const kbId = state.activeKb.id;
+  const kbId = state.activeKb?.id || "";
   const requestId = ++state.requests.operationEvents;
-  const events = await api(`/operation-events?kb_id=${encodeURIComponent(kbId)}&limit=20`);
-  if (requestId !== state.requests.operationEvents || state.activeKb?.id !== kbId) {
+  const path = kbId
+    ? `/operation-events?kb_id=${encodeURIComponent(kbId)}&limit=20`
+    : "/operation-events?limit=20";
+  const events = await api(path);
+  if (requestId !== state.requests.operationEvents || (kbId && state.activeKb?.id !== kbId)) {
     return;
   }
   state.operationEvents = events;

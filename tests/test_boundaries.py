@@ -3,6 +3,7 @@ from io import BytesIO
 import time
 
 import pytest
+from pymilvus import DataType, MilvusClient
 
 from rag_demo.embeddings import LocalHashEmbeddingProvider
 from rag_demo.llm import LocalBoundaryLLMProvider
@@ -132,6 +133,38 @@ async def test_document_delete_and_reindex(service: RagService) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_knowledge_base_removes_related_data(service: RagService, tmp_path: Path) -> None:
+    service.create_knowledge_base(
+        KnowledgeBaseCreate(id="kb_remove", name="删除库", allowed_skills=["write_markdown"])
+    )
+    document = await service.add_document(
+        kb_id="kb_remove",
+        data=DocumentIn(title="删除文档", content="删除知识库时应该同步清理。"),
+    )
+    artifact = await service.run_skill(
+        kb_id="kb_remove",
+        skill_name="write_markdown",
+        instruction="生成删除说明",
+        top_k=3,
+    )
+
+    assert artifact.artifact is not None
+    artifact_path = tmp_path / "artifacts" / artifact.artifact.filename
+    assert artifact_path.exists()
+    assert service.chunk_store.list_chunks(kb_id="kb_remove")
+
+    service.delete_knowledge_base(kb_id="kb_remove")
+
+    assert service.store.get_knowledge_base("kb_remove") is None
+    assert service.store.list_documents(kb_id="kb_remove") == []
+    assert service.store.list_artifacts(kb_id="kb_remove") == []
+    assert service.chunk_store.list_chunks(kb_id="kb_remove") == []
+    assert not artifact_path.exists()
+    with pytest.raises(KeyError):
+        service.get_document(kb_id="kb_remove", document_id=document.id)
+
+
+@pytest.mark.asyncio
 async def test_chunks_are_stored_in_local_milvus_lite(tmp_path: Path) -> None:
     service = RagService(
         store=JsonStore(tmp_path),
@@ -184,6 +217,65 @@ def test_milvus_lite_stores_mixed_embedding_dimensions_in_separate_collections(t
         limit=5,
     )
     assert [match.chunk.id for match in matches] == ["chunk_dim2"]
+
+
+def test_milvus_lite_reads_legacy_collection_without_tenant_fields(tmp_path: Path) -> None:
+    chunk_store = create_chunk_store(uri=tmp_path / "milvus_lite.db", collection_name="legacy_chunks")
+    service = RagService(
+        store=JsonStore(tmp_path),
+        chunk_store=chunk_store,
+        embeddings=LocalHashEmbeddingProvider(),
+        llm=LocalBoundaryLLMProvider(),
+        artifact_dir=tmp_path / "artifacts",
+    )
+    service.create_knowledge_base(KnowledgeBaseCreate(id="kb_legacy", name="旧向量集合"))
+    service.store.add_document(
+        Document(
+            id="doc_legacy",
+            knowledge_base_id="kb_legacy",
+            title="旧向量文档",
+            content="旧 Milvus 集合没有 tenant_id 和 permission_tags_json 字段。",
+        )
+    )
+
+    schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=False)
+    schema.add_field(field_name="id", datatype=DataType.VARCHAR, is_primary=True, max_length=128)
+    schema.add_field(field_name="embedding", datatype=DataType.FLOAT_VECTOR, dim=2)
+    schema.add_field(field_name="knowledge_base_id", datatype=DataType.VARCHAR, max_length=128)
+    schema.add_field(field_name="document_id", datatype=DataType.VARCHAR, max_length=128)
+    schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=512)
+    schema.add_field(field_name="text", datatype=DataType.VARCHAR, max_length=8192)
+    schema.add_field(field_name="metadata_json", datatype=DataType.VARCHAR, max_length=8192)
+    schema.add_field(field_name="created_at", datatype=DataType.VARCHAR, max_length=64)
+
+    index_params = chunk_store._client.prepare_index_params()
+    index_params.add_index(field_name="embedding", index_type="FLAT", metric_type="COSINE")
+    chunk_store._client.create_collection(
+        collection_name="legacy_chunks",
+        schema=schema,
+        index_params=index_params,
+    )
+    chunk_store._client.insert(
+        collection_name="legacy_chunks",
+        data=[
+            {
+                "id": "chunk_legacy",
+                "embedding": [1.0, 0.0],
+                "knowledge_base_id": "kb_legacy",
+                "document_id": "doc_legacy",
+                "title": "旧向量文档",
+                "text": "旧集合分块",
+                "metadata_json": "{}",
+                "created_at": "2026-05-29T00:00:00+00:00",
+            }
+        ],
+    )
+    chunk_store._client.flush(collection_name="legacy_chunks")
+
+    summaries = service.list_documents(kb_id="kb_legacy", access=AccessContext())
+
+    assert summaries[0].chunk_count == 1
+    assert chunk_store.list_chunks(kb_id="kb_legacy", tenant_id="default")[0].tenant_id == "default"
 
 
 def test_sqlite_store_migrates_legacy_json_metadata(tmp_path: Path) -> None:

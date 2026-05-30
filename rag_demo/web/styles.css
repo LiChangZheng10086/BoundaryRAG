@@ -313,13 +313,42 @@ h2 {
 }
 
 .kb-item {
-  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: stretch;
   border: 1px solid var(--line);
   border-radius: 22px;
-  padding: 1rem;
+  padding: 0.55rem;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.45);
+  box-shadow: none;
+}
+
+.kb-select {
+  width: 100%;
+  min-width: 0;
+  border-radius: 16px;
+  padding: 0.55rem 0.65rem;
   color: var(--ink);
   text-align: left;
-  background: rgba(255, 255, 255, 0.45);
+  background: transparent;
+  box-shadow: none;
+}
+
+.kb-delete {
+  align-self: center;
+  min-height: 38px;
+  border-color: rgba(159, 70, 53, 0.24);
+  padding: 0.55rem 0.75rem;
+  color: #7b2c22;
+  background: rgba(159, 70, 53, 0.1);
+  font-weight: 800;
+}
+
+.kb-select:hover,
+.kb-delete:hover {
+  transform: none;
   box-shadow: none;
 }
 
@@ -328,7 +357,8 @@ h2 {
   background: rgba(47, 95, 74, 0.12);
 }
 
-.kb-item small {
+.kb-item small,
+.operation-item small {
   display: block;
   margin-top: 0.35rem;
   color: var(--muted);
@@ -383,19 +413,45 @@ h2 {
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 28px;
+  padding: 0.35rem;
+  background: rgba(255, 255, 255, 0.36);
 }
 
 .tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 112px;
+  width: 112px;
+  min-width: 112px;
+  max-width: 112px;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+  border: 1px solid transparent;
+  padding: 0;
   color: var(--moss-dark);
   background: rgba(255, 255, 255, 0.46);
+  box-shadow: none;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  transform: none;
   box-shadow: none;
 }
 
 .tab.active {
+  border-color: rgba(47, 95, 74, 0.22);
   color: #fffaf0;
   background: linear-gradient(135deg, var(--moss), var(--moss-dark));
-  box-shadow: 0 12px 26px rgba(29, 61, 49, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
 }
 
 .operation-status {
@@ -672,6 +728,10 @@ mark {
 
   .hero {
     display: grid;
+  }
+
+  .tabs {
+    border-radius: 26px;
   }
 
   .sidebar {

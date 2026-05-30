@@ -30,6 +30,27 @@ class JsonStore:
             self._write_json("knowledge_bases.json", [KnowledgeBase.model_validate(item).model_dump() for item in items])
         return kb
 
+    def delete_knowledge_base(self, kb_id: str) -> bool:
+        with self._lock:
+            items = self._read_json("knowledge_bases.json", [])
+            remaining = [item for item in items if item["id"] != kb_id]
+            if len(remaining) == len(items):
+                return False
+            self._write_json("knowledge_bases.json", remaining)
+            self._write_json(
+                "documents.json",
+                [item for item in self._read_json("documents.json", []) if item["knowledge_base_id"] != kb_id],
+            )
+            self._write_json(
+                "artifacts.json",
+                [item for item in self._read_json("artifacts.json", []) if item["knowledge_base_id"] != kb_id],
+            )
+            self._write_json(
+                "chunks.json",
+                [item for item in self._read_json("chunks.json", []) if item["knowledge_base_id"] != kb_id],
+            )
+            return True
+
     def add_document(self, document: Document) -> Document:
         with self._lock:
             items = self._read_json("documents.json", [])
@@ -234,6 +255,24 @@ class SqliteStore:
                 ),
             )
         return kb
+
+    def delete_knowledge_base(self, kb_id: str) -> bool:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("select id from knowledge_bases where id = ?", (kb_id,)).fetchone()
+            if not row:
+                return False
+            conn.execute("delete from knowledge_bases where id = ?", (kb_id,))
+            conn.execute("delete from documents where knowledge_base_id = ?", (kb_id,))
+            conn.execute("delete from artifacts where knowledge_base_id = ?", (kb_id,))
+            self._insert_operation(
+                conn,
+                OperationEvent(
+                    event_type="knowledge_base.deleted",
+                    knowledge_base_id=kb_id,
+                    message=f"Knowledge base '{kb_id}' deleted",
+                ),
+            )
+            return True
 
     def add_document(self, document: Document) -> Document:
         with self._lock, self._connect() as conn:
