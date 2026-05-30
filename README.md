@@ -1,4 +1,5 @@
 # BoundaryRAG
+<img width="728" height="797" alt="image" src="https://github.com/user-attachments/assets/c3437e9a-c0cc-4e45-9bda-c71ab90ad19d" />
 
 一个强调“知识库边界感”的 RAG MVP。
 
