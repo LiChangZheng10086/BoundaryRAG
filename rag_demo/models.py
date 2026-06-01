@@ -95,12 +95,32 @@ class Source(BaseModel):
 class QueryRequest(ApiRequest):
     question: str = Field(min_length=1, max_length=2000)
     top_k: int = Field(default=5, ge=1, le=20)
+    conversation_id: str | None = Field(default=None, pattern=r"^conv_[a-f0-9]{32}$")
 
 
 class QueryResponse(BaseModel):
     answer: str
     sources: list[Source]
     trace_id: str = Field(default_factory=lambda: f"trace_{uuid4().hex}")
+    conversation_id: str = ""
+
+
+class Conversation(BaseModel):
+    id: str = Field(default_factory=lambda: f"conv_{uuid4().hex}")
+    knowledge_base_id: str
+    user_id: str = "demo-user"
+    tenant_id: str = "default"
+    title: str = "新对话"
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class ConversationMessage(BaseModel):
+    id: str = Field(default_factory=lambda: f"msg_{uuid4().hex}")
+    conversation_id: str
+    role: str = Field(pattern=r"^(user|assistant)$")
+    content: str
+    created_at: str = Field(default_factory=utc_now)
 
 
 class SkillRequest(ApiRequest):

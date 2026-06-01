@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from rag_demo.chunking import chunk_text
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from pathlib import Path
+
+from rag_demo.chunking import chunk_document
 from rag_demo.embeddings import EmbeddingProvider
 from rag_demo.llm import LLMProvider
 from rag_demo.models import (
@@ -9,6 +13,8 @@ from rag_demo.models import (
     ArtifactRecord,
     ArtifactPreview,
     ArtifactSummary,
+    Conversation,
+    ConversationMessage,
     Chunk,
     Document,
     DocumentIn,
@@ -24,12 +30,21 @@ from rag_demo.retriever import Retriever
 from rag_demo.skills import SkillRegistry
 from rag_demo.store import JsonStore, SqliteStore
 from rag_demo.vector_store import ChunkStore, create_chunk_store
-from pathlib import Path
 
 from rag_demo.document_parsers import UploadSecurityPolicy, parse_uploaded_document
 
 
 DEFAULT_MAX_DOCUMENT_CHARS = 200_000
+CONVERSATION_CONTEXT_MESSAGES = 12
+
+
+@dataclass(frozen=True)
+class ConversationStream:
+    conversation_id: str
+    chunks: AsyncIterator[str]
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self.chunks
 
 
 class RagService:
@@ -176,6 +191,27 @@ class RagService:
             chunk_counts=chunk_counts,
         )
 
+    def list_conversations(self, *, kb_id: str, access: AccessContext | None = None) -> list[Conversation]:
+        access = access or AccessContext()
+        kb = self._require_kb(kb_id, access=access)
+        return self.store.list_conversations(
+            kb_id=kb.id,
+            user_id=access.user_id,
+            tenant_id=access.tenant_id,
+        )
+
+    def list_conversation_messages(
+        self,
+        *,
+        kb_id: str,
+        conversation_id: str,
+        access: AccessContext | None = None,
+    ) -> list[ConversationMessage]:
+        access = access or AccessContext()
+        kb = self._require_kb(kb_id, access=access)
+        conversation = self._get_conversation_for_access(kb=kb, access=access, conversation_id=conversation_id)
+        return self.store.list_conversation_messages(conversation_id=conversation.id, limit=100)
+
     def get_document(self, *, kb_id: str, document_id: str, access: AccessContext | None = None) -> Document:
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
@@ -226,10 +262,11 @@ class RagService:
             raise
 
     async def _build_chunks(self, document: Document) -> list[Chunk]:
-        pieces = chunk_text(document.content)
+        pieces = chunk_document(document.content)
         if not pieces:
             raise ValueError("document content is empty after normalization")
-        embeddings = await self.embeddings.embed(pieces)
+        texts = [piece.text for piece in pieces]
+        embeddings = await self.embeddings.embed(texts)
         if len(embeddings) != len(pieces):
             raise RuntimeError(
                 "embedding provider returned "
@@ -242,8 +279,8 @@ class RagService:
                 knowledge_base_id=document.knowledge_base_id,
                 document_id=document.id,
                 title=document.title,
-                text=piece,
-                metadata=document.metadata,
+                text=piece.text,
+                metadata=document.metadata | piece.metadata,
                 tenant_id=kb.tenant_id,
                 permission_tags=document.permission_tags,
                 embedding=embedding,
@@ -277,21 +314,139 @@ class RagService:
         message = str(exc).strip()
         return message[:500] if message else exc.__class__.__name__
 
+    def _resolve_conversation(
+        self,
+        *,
+        kb: KnowledgeBase,
+        access: AccessContext,
+        conversation_id: str | None,
+        question: str,
+    ) -> Conversation:
+        if conversation_id:
+            return self._get_conversation_for_access(kb=kb, access=access, conversation_id=conversation_id)
+
+        return self.store.create_conversation(
+            Conversation(
+                knowledge_base_id=kb.id,
+                user_id=access.user_id,
+                tenant_id=access.tenant_id,
+                title=self._conversation_title(question),
+            )
+        )
+
+    def _get_conversation_for_access(
+        self,
+        *,
+        kb: KnowledgeBase,
+        access: AccessContext,
+        conversation_id: str,
+    ) -> Conversation:
+        conversation = self.store.get_conversation(conversation_id)
+        if not conversation:
+            raise KeyError(f"conversation '{conversation_id}' does not exist")
+        if conversation.knowledge_base_id != kb.id:
+            raise PermissionError(f"conversation '{conversation_id}' is not in knowledge base '{kb.id}'")
+        if conversation.user_id != access.user_id or conversation.tenant_id != access.tenant_id:
+            raise PermissionError(f"conversation '{conversation_id}' is not accessible")
+        return conversation
+
+    def _record_conversation_turn(self, *, conversation: Conversation, question: str, answer: str) -> None:
+        self.store.add_conversation_message(
+            ConversationMessage(
+                conversation_id=conversation.id,
+                role="user",
+                content=question,
+            )
+        )
+        self.store.add_conversation_message(
+            ConversationMessage(
+                conversation_id=conversation.id,
+                role="assistant",
+                content=answer,
+            )
+        )
+        self.store.touch_conversation(conversation_id=conversation.id)
+
+    def _conversation_title(self, question: str) -> str:
+        title = " ".join(question.strip().split())
+        return title[:40] or "新对话"
+
     async def query(
         self,
         *,
         kb_id: str,
         question: str,
         top_k: int,
+        conversation_id: str | None = None,
         access: AccessContext | None = None,
     ) -> QueryResponse:
         access = access or AccessContext()
         if not question.strip():
             raise ValueError("question is empty")
         kb = self._require_kb(kb_id, access=access)
+        self.skills.get_allowed(kb=kb, skill_name="answer_question")
+        conversation = self._resolve_conversation(
+            kb=kb,
+            access=access,
+            conversation_id=conversation_id,
+            question=question,
+        )
+        history = self.store.list_conversation_messages(
+            conversation_id=conversation.id,
+            limit=CONVERSATION_CONTEXT_MESSAGES,
+        )
         sources = await self.retriever.retrieve(kb_id=kb.id, query=question, top_k=top_k, access=access)
-        skill = self.skills.get_allowed(kb=kb, skill_name="answer_question")
-        return await skill.run(kb=kb, instruction=question, sources=sources, llm=self.llm)
+        answer = await self.llm.answer(kb=kb, instruction=question, sources=sources, history=history)
+        self._record_conversation_turn(conversation=conversation, question=question, answer=answer)
+        return QueryResponse(answer=answer, sources=sources, conversation_id=conversation.id)
+
+    async def query_stream(
+        self,
+        *,
+        kb_id: str,
+        question: str,
+        top_k: int,
+        conversation_id: str | None = None,
+        access: AccessContext | None = None,
+    ) -> ConversationStream:
+        access = access or AccessContext()
+        if not question.strip():
+            raise ValueError("question is empty")
+        kb = self._require_kb(kb_id, access=access)
+        self.skills.get_allowed(kb=kb, skill_name="answer_question")
+        conversation = self._resolve_conversation(
+            kb=kb,
+            access=access,
+            conversation_id=conversation_id,
+            question=question,
+        )
+        history = self.store.list_conversation_messages(
+            conversation_id=conversation.id,
+            limit=CONVERSATION_CONTEXT_MESSAGES,
+        )
+        sources = await self.retriever.retrieve(kb_id=kb.id, query=question, top_k=top_k, access=access)
+        answer_chunks: list[str] = []
+
+        async def stream() -> AsyncIterator[str]:
+            try:
+                async for chunk in self.llm.stream_answer(
+                    kb=kb,
+                    instruction=question,
+                    sources=sources,
+                    history=history,
+                ):
+                    answer_chunks.append(chunk)
+                    yield chunk
+            except asyncio.CancelledError:
+                raise
+            else:
+                self._record_conversation_turn(
+                    conversation=conversation,
+                    question=question,
+                    answer="".join(answer_chunks),
+                )
+
+        return ConversationStream(conversation_id=conversation.id, chunks=stream())
 
     async def run_skill(
         self,

@@ -5,6 +5,7 @@ import time
 import pytest
 from pymilvus import DataType, MilvusClient
 
+from rag_demo.chunking import chunk_document
 from rag_demo.embeddings import LocalHashEmbeddingProvider
 from rag_demo.llm import LocalBoundaryLLMProvider
 from rag_demo.models import AccessContext, ArtifactRecord, Chunk, Document, DocumentIn, KnowledgeBase, KnowledgeBaseCreate
@@ -27,6 +28,33 @@ class MissingEmbeddingProvider(LocalHashEmbeddingProvider):
     async def embed(self, texts: list[str]) -> list[list[float]]:
         embeddings = await super().embed(texts)
         return embeddings[:-1]
+
+
+def test_structured_chunking_uses_heading_paragraph_code_and_parent_child_metadata() -> None:
+    text = """# 安装说明
+
+第一段介绍安装背景和适用范围。
+
+```python
+def install():
+    return "ok"
+```
+
+## API 说明
+
+第二段介绍 API 调用方式。""" + "\n补充说明。" * 80
+
+    pieces = chunk_document(text, max_parent_chars=220, max_child_chars=120, child_overlap=20)
+
+    assert pieces
+    assert [piece.metadata["chunk_index"] for piece in pieces] == list(range(len(pieces)))
+    assert all(piece.metadata["parent_id"] for piece in pieces)
+    assert all(piece.metadata["split_strategy"] == "heading_semantic_paragraph_code_parent_child" for piece in pieces)
+    assert all(piece.metadata["semantic_boundary"] is True for piece in pieces)
+    assert any(piece.metadata["heading_path"] == ["安装说明"] for piece in pieces)
+    assert any(piece.metadata["heading_path"] == ["安装说明", "API 说明"] for piece in pieces)
+    assert any("code" in piece.metadata["block_types"] and "```python" in piece.text for piece in pieces)
+    assert len({piece.metadata["parent_id"] for piece in pieces}) >= 2
 
 
 @pytest.mark.asyncio
@@ -182,6 +210,9 @@ async def test_chunks_are_stored_in_local_milvus_lite(tmp_path: Path) -> None:
     chunks = service.chunk_store.list_chunks(kb_id="kb_milvus")
     assert chunks
     assert chunks[0].embedding
+    assert chunks[0].metadata["parent_id"].startswith("parent_")
+    assert chunks[0].metadata["chunk_index"] == 0
+    assert chunks[0].metadata["split_strategy"] == "heading_semantic_paragraph_code_parent_child"
     assert (tmp_path / "milvus_lite.db").exists()
     assert not (tmp_path / "chunks.json").exists()
 
@@ -325,10 +356,21 @@ async def test_sqlite_store_persists_operation_events(tmp_path: Path) -> None:
 
     service.create_knowledge_base(KnowledgeBaseCreate(id="kb_ops", name="操作记录库"))
     await service.add_document(kb_id="kb_ops", data=DocumentIn(title="操作文档", content="操作记录应该落库。"))
+    response = await service.query(kb_id="kb_ops", question="操作记录是什么？", top_k=3)
 
     events = store.list_operation_events(limit=20)
     event_types = {event.event_type for event in events}
     assert {"knowledge_base.created", "document.created", "document.indexed"}.issubset(event_types)
+    conversations = store.list_conversations(kb_id="kb_ops", user_id="demo-user", tenant_id="default")
+    assert [conversation.id for conversation in conversations] == [response.conversation_id]
+    assert [message.role for message in store.list_conversation_messages(conversation_id=response.conversation_id)] == [
+        "user",
+        "assistant",
+    ]
+
+    reopened = SqliteStore(tmp_path / "boundaryrag.sqlite3")
+    assert reopened.get_conversation(response.conversation_id) is not None
+    assert len(reopened.list_conversation_messages(conversation_id=response.conversation_id)) == 2
 
 
 @pytest.mark.asyncio

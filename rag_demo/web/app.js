@@ -3,15 +3,20 @@ const state = {
   activeKb: null,
   documents: [],
   artifacts: [],
+  conversations: [],
+  conversationMessages: [],
   operationEvents: [],
   runtimeConfig: null,
   activeTab: "ask",
   authToken: window.localStorage.getItem("rag_demo_auth_token") || "",
   recentKbIds: JSON.parse(window.localStorage.getItem("rag_demo_recent_kbs") || "[]"),
+  conversationIds: JSON.parse(window.localStorage.getItem("rag_demo_conversations") || "{}"),
   requests: {
     knowledgeBases: 0,
     documents: 0,
     artifacts: 0,
+    conversations: 0,
+    conversationMessages: 0,
     operationEvents: 0,
     query: 0,
     generate: 0,
@@ -24,6 +29,7 @@ const state = {
   },
   lastQueryText: "",
   lastGenerateText: "",
+  queryAbortController: null,
   identity: {
     userId: "demo-user",
     tenantId: "default",
@@ -47,6 +53,9 @@ const els = {
   authModeLabel: $("authModeLabel"),
   boundarySkills: $("boundarySkills"),
   boundaryTitle: $("boundaryTitle"),
+  activeConversationLabel: $("activeConversationLabel"),
+  conversationList: $("conversationList"),
+  conversationMessages: $("conversationMessages"),
   docContent: $("docContent"),
   docForm: $("docForm"),
   docPermissionTags: $("docPermissionTags"),
@@ -58,7 +67,6 @@ const els = {
   documentList: $("documentList"),
   generateAnswerBox: $("generateAnswerBox"),
   generateArtifactBox: $("generateArtifactBox"),
-  generateSources: $("generateSources"),
   generateTraceId: $("generateTraceId"),
   instruction: $("instruction"),
   kbForm: $("kbForm"),
@@ -88,13 +96,14 @@ const els = {
   documentPreview: $("documentPreview"),
   reloadDocsBtn: $("reloadDocsBtn"),
   reloadArtifactsBtn: $("reloadArtifactsBtn"),
+  reloadConversationsBtn: $("reloadConversationsBtn"),
   reloadOperationsBtn: $("reloadOperationsBtn"),
   refreshBtn: $("refreshBtn"),
+  newConversationBtn: $("newConversationBtn"),
   skillForm: $("skillForm"),
   skillName: $("skillName"),
   skillSubmit: $("skillSubmit"),
   selectedSkillPill: $("selectedSkillPill"),
-  sources: $("sources"),
   toast: $("toast"),
   traceId: $("traceId"),
   authToken: $("authToken"),
@@ -134,6 +143,46 @@ async function api(path, options = {}) {
     throw new Error(errorMessage(data, `请求失败：${response.status}`));
   }
   return data;
+}
+
+async function streamText(path, options = {}, onChunk) {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...accessHeaders(),
+      ...(options.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(errorMessage(parseResponseBody(text), `请求失败：${response.status}`));
+  }
+
+  if (!response.body) {
+    onChunk(await response.text());
+    return response;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      onChunk(decoder.decode(value, { stream: true }));
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      onChunk(tail);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return response;
 }
 
 function parseResponseBody(text) {
@@ -291,6 +340,27 @@ function rememberKnowledgeBase(kbId) {
   window.localStorage.setItem("rag_demo_recent_kbs", JSON.stringify(state.recentKbIds));
 }
 
+function activeConversationId(kbId) {
+  return state.conversationIds[kbId] || "";
+}
+
+function rememberConversation(kbId, conversationId) {
+  if (!conversationId) {
+    return;
+  }
+  state.conversationIds = {
+    ...state.conversationIds,
+    [kbId]: conversationId,
+  };
+  window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
+}
+
+function forgetConversation(kbId) {
+  const { [kbId]: _conversationId, ...remaining } = state.conversationIds;
+  state.conversationIds = remaining;
+  window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
+}
+
 function renderKnowledgeBases() {
   els.kbList.innerHTML = "";
 
@@ -350,17 +420,24 @@ function renderKnowledgeBases() {
       state.activeKb = kb;
       state.requests.query += 1;
       state.requests.generate += 1;
+      state.requests.conversations += 1;
+      state.requests.conversationMessages += 1;
+      if (state.queryAbortController) {
+        state.queryAbortController.abort();
+        state.queryAbortController = null;
+      }
       rememberKnowledgeBase(kb.id);
+      state.conversations = [];
+      state.conversationMessages = [];
       els.documentPreview.textContent = "点击文档的“预览”查看解析后的入库文本。";
       els.answerBox.textContent = "问答结果会显示在这里。";
       els.generateAnswerBox.textContent = "生成结果会显示在这里。";
       els.artifactPreview.textContent = "点击生成历史的“预览”查看文件内容。";
-      els.sources.innerHTML = "";
       els.artifactBox.innerHTML = "";
-      els.generateSources.innerHTML = "";
       els.generateArtifactBox.innerHTML = "";
       loadDocuments().catch((error) => showToast(error.message));
       loadArtifacts().catch((error) => showToast(error.message));
+      loadConversations().catch((error) => showToast(error.message));
       loadOperationEvents().catch((error) => showToast(error.message));
       setOperationStatus(`已切换到 ${kb.name}，边界已锁定。`);
       renderAll();
@@ -373,12 +450,21 @@ function renderKnowledgeBases() {
         }
         await api(`/knowledge-bases/${encodeURIComponent(kb.id)}`, { method: "DELETE" });
         state.recentKbIds = state.recentKbIds.filter((id) => id !== kb.id);
+        const { [kb.id]: _deletedConversationId, ...remainingConversationIds } = state.conversationIds;
+        state.conversationIds = remainingConversationIds;
         window.localStorage.setItem("rag_demo_recent_kbs", JSON.stringify(state.recentKbIds));
+        window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
         if (state.activeKb?.id === kb.id) {
           state.activeKb = null;
           state.documents = [];
           state.artifacts = [];
+          state.conversations = [];
+          state.conversationMessages = [];
           state.operationEvents = [];
+          if (state.queryAbortController) {
+            state.queryAbortController.abort();
+            state.queryAbortController = null;
+          }
           els.answerBox.textContent = "问答结果会显示在这里。";
           els.generateAnswerBox.textContent = "生成结果会显示在这里。";
           els.documentPreview.textContent = "点击文档的“预览”查看解析后的入库文本。";
@@ -387,6 +473,7 @@ function renderKnowledgeBases() {
         await loadKnowledgeBases();
         await loadDocuments();
         await loadArtifacts();
+        await loadConversations();
         await loadOperationEvents();
         showToast("知识库已删除。");
       });
@@ -450,13 +537,10 @@ function renderTabs() {
 function renderResult(result, options = {}) {
   const answerBox = options.answerBox || els.answerBox;
   const trace = options.trace || els.traceId;
-  const sources = options.sources || els.sources;
   const artifactBox = options.artifactBox || els.artifactBox;
-  const queryText = options.queryText || "";
 
   answerBox.textContent = result.answer || "没有返回回答。";
   trace.textContent = result.trace_id || "";
-  sources.innerHTML = "";
   artifactBox.innerHTML = "";
 
   if (result.artifact) {
@@ -469,25 +553,6 @@ function renderResult(result, options = {}) {
       downloadArtifact(result.artifact).catch((error) => showToast(error.message));
     });
     artifactBox.appendChild(link);
-  }
-
-  for (const source of result.sources || []) {
-    const card = document.createElement("div");
-    card.className = "source";
-    card.innerHTML = `
-      <strong>${escapeHtml(source.title)}</strong>
-      <span>
-        ${escapeHtml(source.knowledge_base_id)}
-        · score ${Number(source.score).toFixed(3)}
-        · vector ${Number(source.vector_score || 0).toFixed(3)}
-        · keyword ${Number(source.lexical_score || 0).toFixed(3)}
-      </span>
-      <p>${highlightText(source.text, queryText)}</p>
-      <div class="source-actions">
-        <button class="ghost" data-source-doc-id="${escapeHtml(source.document_id)}" type="button">打开原文预览</button>
-      </div>
-    `;
-    sources.appendChild(card);
   }
 }
 
@@ -602,6 +667,72 @@ function renderArtifacts() {
   }
 }
 
+function renderConversations() {
+  els.conversationList.innerHTML = "";
+
+  if (!state.activeKb) {
+    els.activeConversationLabel.textContent = "未选择知识库";
+    els.conversationList.textContent = "选择知识库后会显示历史对话。";
+    renderConversationMessages();
+    return;
+  }
+
+  const selectedId = activeConversationId(state.activeKb.id);
+  const selected = state.conversations.find((conversation) => conversation.id === selectedId);
+  els.activeConversationLabel.textContent = selected ? selected.title : "新对话";
+
+  if (!state.conversations.length) {
+    els.conversationList.textContent = "当前知识库还没有历史对话，发送一次问题后会自动保存。";
+    renderConversationMessages();
+    return;
+  }
+
+  for (const conversation of state.conversations) {
+    const button = document.createElement("button");
+    button.className = `conversation-item ${conversation.id === selectedId ? "active" : ""}`;
+    button.type = "button";
+    button.dataset.conversationId = conversation.id;
+    button.innerHTML = `
+      <strong>${escapeHtml(conversation.title || "未命名对话")}</strong>
+      <span>${escapeHtml(formatTime(conversation.updated_at))}</span>
+    `;
+    els.conversationList.appendChild(button);
+  }
+
+  renderConversationMessages();
+}
+
+function renderConversationMessages() {
+  els.conversationMessages.innerHTML = "";
+
+  if (!state.activeKb) {
+    els.conversationMessages.textContent = "选择知识库后会显示对话消息。";
+    return;
+  }
+
+  const selectedId = activeConversationId(state.activeKb.id);
+  if (!selectedId) {
+    els.conversationMessages.textContent = "正在准备新对话。";
+    return;
+  }
+
+  if (!state.conversationMessages.length) {
+    els.conversationMessages.textContent = "这条会话暂无消息。";
+    return;
+  }
+
+  for (const message of state.conversationMessages) {
+    const item = document.createElement("div");
+    item.className = `conversation-message ${message.role}`;
+    item.innerHTML = `
+      <strong>${message.role === "user" ? "用户" : "助手"}</strong>
+      <span>${escapeHtml(formatTime(message.created_at))}</span>
+      <p>${escapeHtml(message.content)}</p>
+    `;
+    els.conversationMessages.appendChild(item);
+  }
+}
+
 function renderOperationEvents() {
   els.operationList.innerHTML = "";
 
@@ -629,6 +760,7 @@ function renderAll() {
   renderBoundary();
   renderDocuments();
   renderArtifacts();
+  renderConversations();
   renderOperationEvents();
   renderTabs();
 }
@@ -687,6 +819,63 @@ async function loadArtifacts() {
   }
   state.artifacts = artifacts;
   renderArtifacts();
+}
+
+async function loadConversations() {
+  if (!state.activeKb) {
+    state.conversations = [];
+    state.conversationMessages = [];
+    renderConversations();
+    return;
+  }
+  const kbId = state.activeKb.id;
+  const requestId = ++state.requests.conversations;
+  const conversations = await api(`/knowledge-bases/${encodeURIComponent(kbId)}/conversations`);
+  if (requestId !== state.requests.conversations || state.activeKb?.id !== kbId) {
+    return;
+  }
+  state.conversations = conversations;
+  state.conversationMessages = [];
+
+  const selectedId = activeConversationId(kbId);
+  const selected = conversations.find((conversation) => conversation.id === selectedId) || conversations[0];
+  if (selected) {
+    rememberConversation(kbId, selected.id);
+    renderConversations();
+    await loadConversationMessages(selected.id);
+    return;
+  }
+
+  forgetConversation(kbId);
+  renderConversations();
+}
+
+async function loadConversationMessages(conversationId = "") {
+  if (!state.activeKb) {
+    state.conversationMessages = [];
+    renderConversationMessages();
+    return;
+  }
+  const kbId = state.activeKb.id;
+  const selectedId = conversationId || activeConversationId(kbId);
+  if (!selectedId) {
+    state.conversationMessages = [];
+    renderConversationMessages();
+    return;
+  }
+  const requestId = ++state.requests.conversationMessages;
+  const messages = await api(
+    `/knowledge-bases/${encodeURIComponent(kbId)}/conversations/${encodeURIComponent(selectedId)}/messages`
+  );
+  if (
+    requestId !== state.requests.conversationMessages
+    || state.activeKb?.id !== kbId
+    || activeConversationId(kbId) !== selectedId
+  ) {
+    return;
+  }
+  state.conversationMessages = messages;
+  renderConversationMessages();
 }
 
 async function loadOperationEvents() {
@@ -773,9 +962,7 @@ async function executeSkill(skillName, instruction) {
   renderResult(result, {
     answerBox: els.generateAnswerBox,
     trace: els.generateTraceId,
-    sources: els.generateSources,
     artifactBox: els.generateArtifactBox,
-    queryText: instruction,
   });
   await loadArtifacts();
   setOperationStatus("生成完成，下载链接和历史记录已更新。");
@@ -840,33 +1027,6 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
-function highlightText(text, query) {
-  let html = escapeHtml(text);
-  const terms = queryTerms(query);
-  for (const term of terms) {
-    const escapedTerm = escapeHtml(term);
-    if (!escapedTerm) {
-      continue;
-    }
-    html = html.replace(new RegExp(escapeRegExp(escapedTerm), "gi"), (match) => `<mark>${match}</mark>`);
-  }
-  return html;
-}
-
-function queryTerms(query) {
-  const compact = query.replace(/\s+/g, "");
-  const words = query.split(/\s+/).map((word) => word.trim()).filter((word) => word.length >= 2);
-  const grams = [];
-  for (let index = 0; index < compact.length - 1; index += 1) {
-    grams.push(compact.slice(index, index + 2));
-  }
-  return Array.from(new Set([...words, ...grams])).slice(0, 12);
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function formatTime(value) {
   if (!value) {
     return "-";
@@ -885,6 +1045,7 @@ els.refreshBtn.addEventListener("click", () => {
   loadKnowledgeBases()
     .then(loadDocuments)
     .then(loadArtifacts)
+    .then(loadConversations)
     .then(loadOperationEvents)
     .then(() => showToast("知识库列表已刷新。"))
     .catch((error) => showToast(error.message));
@@ -944,6 +1105,7 @@ els.kbForm.addEventListener("submit", (event) => {
     await loadKnowledgeBases();
     await loadDocuments();
     await loadArtifacts();
+    await loadConversations();
     await loadOperationEvents();
     showToast("知识库已创建，并切换为当前边界。");
   });
@@ -1016,6 +1178,12 @@ els.reloadArtifactsBtn.addEventListener("click", () => {
     .catch((error) => showToast(error.message));
 });
 
+els.reloadConversationsBtn.addEventListener("click", () => {
+  loadConversations()
+    .then(() => showToast("历史对话已刷新。"))
+    .catch((error) => showToast(error.message));
+});
+
 els.reloadOperationsBtn.addEventListener("click", () => {
   loadOperationEvents()
     .then(() => showToast("操作记录已刷新。"))
@@ -1039,7 +1207,9 @@ els.saveAuthTokenBtn.addEventListener("click", () => {
     showToast("JWT Token 已清空，将使用 demo 请求头。");
   }
   renderBoundary();
-  loadKnowledgeBases().catch((error) => showToast(error.message));
+  loadKnowledgeBases()
+    .then(loadConversations)
+    .catch((error) => showToast(error.message));
   loadOperationEvents().catch((error) => showToast(error.message));
 });
 
@@ -1050,8 +1220,41 @@ els.clearAuthTokenBtn.addEventListener("click", () => {
   applyTokenIdentity("");
   showToast("JWT Token 已清除，将使用 demo 请求头。");
   renderBoundary();
-  loadKnowledgeBases().catch((error) => showToast(error.message));
+  loadKnowledgeBases()
+    .then(loadConversations)
+    .catch((error) => showToast(error.message));
   loadOperationEvents().catch((error) => showToast(error.message));
+});
+
+els.newConversationBtn.addEventListener("click", () => {
+  try {
+    const kb = requireActiveKb();
+    forgetConversation(kb.id);
+    state.conversationMessages = [];
+    els.answerBox.textContent = "新对话已准备好，输入问题后会自动保存。";
+    els.traceId.textContent = "";
+    renderConversations();
+    els.question.focus();
+    showToast("已切换到新对话。");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.conversationList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-conversation-id]");
+  if (!button) {
+    return;
+  }
+  handleButton(button, async () => {
+    const kb = requireActiveKb();
+    const conversationId = button.dataset.conversationId;
+    rememberConversation(kb.id, conversationId);
+    state.conversationMessages = [];
+    renderConversations();
+    await loadConversationMessages(conversationId);
+    setOperationStatus("历史对话已加载，后续提问会接在这条上下文里。");
+  });
 });
 
 els.documentList.addEventListener("click", (event) => {
@@ -1121,41 +1324,71 @@ els.artifactList.addEventListener("click", (event) => {
   });
 });
 
-[els.sources, els.generateSources].forEach((container) => {
-  container.addEventListener("click", (event) => {
-    const button = event.target.closest("button[data-source-doc-id]");
-    if (!button) {
-      return;
-    }
-    handleButton(button, async () => {
-      state.activeTab = "documents";
-      renderTabs();
-      await previewDocument(button.dataset.sourceDocId);
-    });
-  });
-});
-
 els.queryForm.addEventListener("submit", (event) => {
   event.preventDefault();
   handleSubmit(els.queryForm, async () => {
     const kb = requireActiveKb();
     const kbId = kb.id;
     const requestId = ++state.requests.query;
-    setOperationStatus("正在当前知识库内检索并生成回答...", "busy");
-    state.lastQueryText = els.question.value.trim();
-    const result = await api(`/knowledge-bases/${encodeURIComponent(kbId)}/query`, {
-      method: "POST",
-      body: JSON.stringify({
-        question: state.lastQueryText,
-        top_k: 5,
-      }),
-    });
+    const question = els.question.value.trim();
+    state.lastQueryText = question;
+    const conversationId = activeConversationId(kbId);
+    if (state.queryAbortController) {
+      state.queryAbortController.abort();
+    }
+    const controller = new AbortController();
+    state.queryAbortController = controller;
+    setOperationStatus("正在当前知识库内流式生成回答...", "busy");
+    els.answerBox.textContent = "";
+    els.traceId.textContent = "流式输出中...";
+
+    let answer = "";
+    let response = null;
+    try {
+      response = await streamText(
+        `/knowledge-bases/${encodeURIComponent(kbId)}/query/stream`,
+        {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({
+            question,
+            top_k: 5,
+            ...(conversationId ? { conversation_id: conversationId } : {}),
+          }),
+        },
+        (chunk) => {
+          if (requestId !== state.requests.query || state.activeKb?.id !== kbId) {
+            controller.abort();
+            return;
+          }
+          answer += chunk;
+          els.answerBox.textContent = answer;
+        },
+      );
+    } catch (error) {
+      if (error.name === "AbortError") {
+        return;
+      }
+      throw error;
+    } finally {
+      if (state.queryAbortController === controller) {
+        state.queryAbortController = null;
+      }
+      if (requestId === state.requests.query && state.activeKb?.id === kbId) {
+        els.traceId.textContent = "";
+      }
+    }
+
     if (requestId !== state.requests.query || state.activeKb?.id !== kbId) {
       return;
     }
-    renderResult(result, { queryText: state.lastQueryText });
-    setOperationStatus("问答完成，来源已更新。");
-    showToast("已在当前知识库内完成问答。");
+    if (!answer.trim()) {
+      els.answerBox.textContent = "没有返回回答。";
+    }
+    rememberConversation(kbId, response?.headers.get("X-Conversation-Id") || conversationId);
+    await loadConversations();
+    setOperationStatus("问答完成。");
+    showToast("已完成流式回答。");
     await loadOperationEvents();
   });
 });
@@ -1173,5 +1406,6 @@ loadRuntimeConfig()
   .then(loadKnowledgeBases)
   .then(loadDocuments)
   .then(loadArtifacts)
+  .then(loadConversations)
   .then(loadOperationEvents)
   .catch((error) => showToast(error.message));

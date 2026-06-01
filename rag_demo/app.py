@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from rag_demo.auth import AuthConfigError, AuthError, decode_access_token
@@ -15,6 +15,8 @@ from rag_demo.models import (
     AccessContext,
     ArtifactPreview,
     ArtifactSummary,
+    Conversation,
+    ConversationMessage,
     Document,
     DocumentCreateRequest,
     DocumentSummary,
@@ -261,6 +263,35 @@ async def get_document(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@app.get("/knowledge-bases/{kb_id}/conversations", response_model=list[Conversation])
+async def list_conversations(
+    kb_id: str,
+    access: AccessContext = Depends(get_access_context),
+    service: RagService = Depends(get_service),
+) -> list[Conversation]:
+    try:
+        return service.list_conversations(kb_id=kb_id, access=access)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/knowledge-bases/{kb_id}/conversations/{conversation_id}/messages", response_model=list[ConversationMessage])
+async def list_conversation_messages(
+    kb_id: str,
+    conversation_id: str,
+    access: AccessContext = Depends(get_access_context),
+    service: RagService = Depends(get_service),
+) -> list[ConversationMessage]:
+    try:
+        return service.list_conversation_messages(kb_id=kb_id, conversation_id=conversation_id, access=access)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
 @app.delete("/knowledge-bases/{kb_id}/documents/{document_id}", status_code=204)
 async def delete_document(
     kb_id: str,
@@ -309,7 +340,13 @@ async def query(
     service: RagService = Depends(get_service),
 ) -> QueryResponse:
     try:
-        return await service.query(kb_id=kb_id, question=payload.question, top_k=payload.top_k, access=access)
+        return await service.query(
+            kb_id=kb_id,
+            question=payload.question,
+            top_k=payload.top_k,
+            conversation_id=payload.conversation_id,
+            access=access,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -318,6 +355,44 @@ async def query(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/knowledge-bases/{kb_id}/query/stream")
+async def query_stream(
+    kb_id: str,
+    payload: QueryRequest,
+    access: AccessContext = Depends(get_access_context),
+    service: RagService = Depends(get_service),
+) -> StreamingResponse:
+    try:
+        chunks = await service.query_stream(
+            kb_id=kb_id,
+            question=payload.question,
+            top_k=payload.top_k,
+            conversation_id=payload.conversation_id,
+            access=access,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    async def stream_body():
+        try:
+            async for chunk in chunks:
+                if chunk:
+                    yield chunk
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            yield f"\n\n[生成中断：{message[:200]}]"
+
+    conversation_id = getattr(chunks, "conversation_id", payload.conversation_id or "")
+    headers = {"X-Conversation-Id": conversation_id} if conversation_id else None
+    return StreamingResponse(stream_body(), media_type="text/plain; charset=utf-8", headers=headers)
 
 
 @app.post("/knowledge-bases/{kb_id}/skills/{skill_name}", response_model=SkillResponse)

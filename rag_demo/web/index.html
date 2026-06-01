@@ -13,7 +13,7 @@
           <p class="eyebrow">Enterprise Knowledge Boundary</p>
           <h1>有边界感的 RAG 知识库</h1>
           <p class="hero-copy">
-            选择一个知识库后，问答、写文档、引用来源都会被限制在当前知识库内。
+            选择一个知识库后，问答、写文档、生成内容都会被限制在当前知识库内。
             A 的资料不进 B 的上下文，B 的技能也不会借 A 的手。
           </p>
         </div>
@@ -110,36 +110,55 @@
           </div>
 
           <section id="panel-ask" class="tab-panel active" data-panel="ask" role="tabpanel" aria-labelledby="tab-ask">
-            <article class="panel card">
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">Ask</p>
-                  <h2>知识库问答</h2>
-                </div>
-                <span class="pill">answer_question</span>
-              </div>
-	              <form id="queryForm" class="stack">
-	                <label>
-	                  问题
-	                  <textarea id="question" required rows="5" placeholder="比如：报销需要多久内提交？"></textarea>
-	                </label>
-	                <button id="querySubmit" type="submit">只在当前知识库中回答</button>
-	              </form>
-	            </article>
+            <div class="ask-layout">
+              <div class="ask-stack">
+                <article class="panel card">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">Ask</p>
+                      <h2>知识库问答</h2>
+                    </div>
+                    <span class="pill">answer_question</span>
+                  </div>
+                    <form id="queryForm" class="stack">
+                      <label>
+                        问题
+                        <textarea id="question" required rows="5" placeholder="比如：报销需要多久内提交？"></textarea>
+                      </label>
+                      <button id="querySubmit" type="submit">只在当前知识库中回答</button>
+                    </form>
+                </article>
 
-	            <article class="panel result-panel">
-	              <div class="section-head">
-	                <div>
-	                  <p class="eyebrow">Answer</p>
-	                  <h2>回答与来源</h2>
-	                </div>
-	                <span id="traceId" class="trace"></span>
-	              </div>
-	              <pre id="answerBox">问答结果会显示在这里。</pre>
-	              <div id="artifactBox" class="artifact-box"></div>
-	              <div id="sources" class="sources"></div>
-	            </article>
-	          </section>
+                <article class="panel result-panel">
+                  <div class="section-head">
+                    <div>
+                      <p class="eyebrow">Answer</p>
+                      <h2>流式回答</h2>
+                    </div>
+                    <span id="traceId" class="trace"></span>
+                  </div>
+                  <pre id="answerBox">问答结果会显示在这里。</pre>
+                  <div id="artifactBox" class="artifact-box"></div>
+                </article>
+              </div>
+
+              <article class="panel card conversation-panel">
+                <div class="section-head">
+                  <div>
+                    <p class="eyebrow">History</p>
+                    <h2>历史对话</h2>
+                  </div>
+                  <button id="newConversationBtn" class="ghost" type="button">新对话</button>
+                </div>
+                <div class="conversation-toolbar">
+                  <span id="activeConversationLabel" class="pill">未选择会话</span>
+                  <button id="reloadConversationsBtn" class="ghost" type="button">刷新历史</button>
+                </div>
+                <div id="conversationList" class="conversation-list">当前知识库还没有对话。</div>
+                <div id="conversationMessages" class="conversation-messages">选择一条历史会话查看消息。</div>
+              </article>
+            </div>
+          </section>
 
           <section id="panel-documents" class="tab-panel" data-panel="documents" role="tabpanel" aria-labelledby="tab-documents">
             <div class="cards">
@@ -267,7 +286,6 @@
 	            </div>
 	            <pre id="generateAnswerBox">生成结果会显示在这里。</pre>
 	            <div id="generateArtifactBox" class="artifact-box"></div>
-	            <div id="generateSources" class="sources"></div>
 	          </article>
 
           <article class="panel card">

@@ -6,7 +6,17 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
-from rag_demo.models import ArtifactRecord, Chunk, Document, DocumentSummary, KnowledgeBase, OperationEvent
+from rag_demo.models import (
+    ArtifactRecord,
+    Chunk,
+    Conversation,
+    ConversationMessage,
+    Document,
+    DocumentSummary,
+    KnowledgeBase,
+    OperationEvent,
+    utc_now,
+)
 
 
 class JsonStore:
@@ -44,6 +54,22 @@ class JsonStore:
             self._write_json(
                 "artifacts.json",
                 [item for item in self._read_json("artifacts.json", []) if item["knowledge_base_id"] != kb_id],
+            )
+            conversations = self._read_json("conversations.json", [])
+            deleted_conversation_ids = {
+                item["id"] for item in conversations if item["knowledge_base_id"] == kb_id
+            }
+            self._write_json(
+                "conversations.json",
+                [item for item in conversations if item["knowledge_base_id"] != kb_id],
+            )
+            self._write_json(
+                "conversation_messages.json",
+                [
+                    item
+                    for item in self._read_json("conversation_messages.json", [])
+                    if item["conversation_id"] not in deleted_conversation_ids
+                ],
             )
             self._write_json(
                 "chunks.json",
@@ -182,6 +208,73 @@ class JsonStore:
             self._write_json("artifacts.json", remaining_artifacts)
             return True
 
+    def create_conversation(self, conversation: Conversation) -> Conversation:
+        with self._lock:
+            items = self._read_json("conversations.json", [])
+            if any(item["id"] == conversation.id for item in items):
+                raise ValueError(f"conversation '{conversation.id}' already exists")
+            items.append(conversation.model_dump())
+            self._write_json("conversations.json", items)
+        return conversation
+
+    def get_conversation(self, conversation_id: str) -> Conversation | None:
+        return next(
+            (
+                Conversation.model_validate(item)
+                for item in self._read_json("conversations.json", [])
+                if item["id"] == conversation_id
+            ),
+            None,
+        )
+
+    def list_conversations(
+        self,
+        *,
+        kb_id: str,
+        user_id: str,
+        tenant_id: str,
+        limit: int = 50,
+    ) -> list[Conversation]:
+        conversations = [
+            Conversation.model_validate(item)
+            for item in self._read_json("conversations.json", [])
+            if item["knowledge_base_id"] == kb_id
+            and item.get("user_id") == user_id
+            and item.get("tenant_id") == tenant_id
+        ]
+        conversations.sort(key=lambda item: item.updated_at, reverse=True)
+        return conversations[:limit]
+
+    def touch_conversation(self, *, conversation_id: str, title: str | None = None) -> Conversation:
+        with self._lock:
+            items = self._read_json("conversations.json", [])
+            updated_at = utc_now()
+            for index, item in enumerate(items):
+                if item["id"] == conversation_id:
+                    item = {**item, "updated_at": updated_at}
+                    if title is not None:
+                        item["title"] = title
+                    items[index] = item
+                    self._write_json("conversations.json", items)
+                    return Conversation.model_validate(item)
+            raise KeyError(f"conversation '{conversation_id}' does not exist")
+
+    def add_conversation_message(self, message: ConversationMessage) -> ConversationMessage:
+        with self._lock:
+            items = self._read_json("conversation_messages.json", [])
+            items.append(message.model_dump())
+            self._write_json("conversation_messages.json", items)
+        return message
+
+    def list_conversation_messages(self, *, conversation_id: str, limit: int = 12) -> list[ConversationMessage]:
+        messages = [
+            ConversationMessage.model_validate(item)
+            for item in self._read_json("conversation_messages.json", [])
+            if item["conversation_id"] == conversation_id
+        ]
+        messages.sort(key=lambda item: item.created_at)
+        return messages[-limit:]
+
     def read_legacy_chunks(self) -> list[Chunk]:
         return [Chunk.model_validate(item) for item in self._read_json("chunks.json", [])]
 
@@ -264,6 +357,16 @@ class SqliteStore:
             conn.execute("delete from knowledge_bases where id = ?", (kb_id,))
             conn.execute("delete from documents where knowledge_base_id = ?", (kb_id,))
             conn.execute("delete from artifacts where knowledge_base_id = ?", (kb_id,))
+            conn.execute(
+                """
+                delete from conversation_messages
+                where conversation_id in (
+                    select id from conversations where knowledge_base_id = ?
+                )
+                """,
+                (kb_id,),
+            )
+            conn.execute("delete from conversations where knowledge_base_id = ?", (kb_id,))
             self._insert_operation(
                 conn,
                 OperationEvent(
@@ -474,6 +577,86 @@ class SqliteStore:
             )
             return True
 
+    def create_conversation(self, conversation: Conversation) -> Conversation:
+        with self._lock, self._connect() as conn:
+            self._insert_conversation(conn, conversation)
+            self._insert_operation(
+                conn,
+                OperationEvent(
+                    event_type="conversation.created",
+                    user_id=conversation.user_id,
+                    tenant_id=conversation.tenant_id,
+                    knowledge_base_id=conversation.knowledge_base_id,
+                    message=f"Conversation '{conversation.id}' created",
+                    metadata={"title": conversation.title},
+                ),
+            )
+        return conversation
+
+    def get_conversation(self, conversation_id: str) -> Conversation | None:
+        with self._connect() as conn:
+            row = conn.execute("select * from conversations where id = ?", (conversation_id,)).fetchone()
+        return self._conversation_from_row(row) if row else None
+
+    def list_conversations(
+        self,
+        *,
+        kb_id: str,
+        user_id: str,
+        tenant_id: str,
+        limit: int = 50,
+    ) -> list[Conversation]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from conversations
+                where knowledge_base_id = ? and user_id = ? and tenant_id = ?
+                order by updated_at desc
+                limit ?
+                """,
+                (kb_id, user_id, tenant_id, limit),
+            ).fetchall()
+        return [self._conversation_from_row(row) for row in rows]
+
+    def touch_conversation(self, *, conversation_id: str, title: str | None = None) -> Conversation:
+        updated_at = utc_now()
+        with self._lock, self._connect() as conn:
+            if title is None:
+                cursor = conn.execute(
+                    "update conversations set updated_at = ? where id = ?",
+                    (updated_at, conversation_id),
+                )
+            else:
+                cursor = conn.execute(
+                    "update conversations set title = ?, updated_at = ? where id = ?",
+                    (title, updated_at, conversation_id),
+                )
+            if cursor.rowcount == 0:
+                raise KeyError(f"conversation '{conversation_id}' does not exist")
+            row = conn.execute("select * from conversations where id = ?", (conversation_id,)).fetchone()
+        return self._conversation_from_row(row)
+
+    def add_conversation_message(self, message: ConversationMessage) -> ConversationMessage:
+        with self._lock, self._connect() as conn:
+            self._insert_conversation_message(conn, message)
+        return message
+
+    def list_conversation_messages(self, *, conversation_id: str, limit: int = 12) -> list[ConversationMessage]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                select * from (
+                    select * from conversation_messages
+                    where conversation_id = ?
+                    order by created_at desc
+                    limit ?
+                )
+                order by created_at asc
+                """,
+                (conversation_id, limit),
+            ).fetchall()
+        return [self._conversation_message_from_row(row) for row in rows]
+
     def list_operation_events(self, *, limit: int = 100) -> list[OperationEvent]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -562,12 +745,32 @@ class SqliteStore:
                     created_at text not null
                 );
 
+                create table if not exists conversations (
+                    id text primary key,
+                    knowledge_base_id text not null,
+                    user_id text not null,
+                    tenant_id text not null,
+                    title text not null,
+                    created_at text not null,
+                    updated_at text not null
+                );
+
+                create table if not exists conversation_messages (
+                    id text primary key,
+                    conversation_id text not null,
+                    role text not null,
+                    content text not null,
+                    created_at text not null
+                );
+
                 create index if not exists idx_kb_tenant on knowledge_bases(tenant_id);
                 create index if not exists idx_documents_kb on documents(knowledge_base_id);
                 create index if not exists idx_documents_status on documents(status);
                 create index if not exists idx_artifacts_kb_user on artifacts(knowledge_base_id, user_id);
                 create index if not exists idx_operation_events_created on operation_events(created_at);
                 create index if not exists idx_operation_events_kb on operation_events(knowledge_base_id);
+                create index if not exists idx_conversations_kb_user on conversations(knowledge_base_id, user_id, tenant_id);
+                create index if not exists idx_conversation_messages_conv on conversation_messages(conversation_id, created_at);
                 """
             )
 
@@ -639,6 +842,44 @@ class SqliteStore:
                 artifact.instruction,
                 self._json_dumps(artifact.permission_tags),
                 artifact.created_at,
+            ),
+        )
+
+    def _insert_conversation(self, conn: sqlite3.Connection, conversation: Conversation) -> None:
+        conn.execute(
+            """
+            insert into conversations (
+                id, knowledge_base_id, user_id, tenant_id, title, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conversation.id,
+                conversation.knowledge_base_id,
+                conversation.user_id,
+                conversation.tenant_id,
+                conversation.title,
+                conversation.created_at,
+                conversation.updated_at,
+            ),
+        )
+
+    def _insert_conversation_message(
+        self,
+        conn: sqlite3.Connection,
+        message: ConversationMessage,
+    ) -> None:
+        conn.execute(
+            """
+            insert into conversation_messages (
+                id, conversation_id, role, content, created_at
+            ) values (?, ?, ?, ?, ?)
+            """,
+            (
+                message.id,
+                message.conversation_id,
+                message.role,
+                message.content,
+                message.created_at,
             ),
         )
 
@@ -728,6 +969,26 @@ class SqliteStore:
             skill=row["skill"],
             instruction=row["instruction"],
             permission_tags=self._json_loads(row["permission_tags_json"], []),
+            created_at=row["created_at"],
+        )
+
+    def _conversation_from_row(self, row: sqlite3.Row) -> Conversation:
+        return Conversation(
+            id=row["id"],
+            knowledge_base_id=row["knowledge_base_id"],
+            user_id=row["user_id"],
+            tenant_id=row["tenant_id"],
+            title=row["title"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _conversation_message_from_row(self, row: sqlite3.Row) -> ConversationMessage:
+        return ConversationMessage(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            role=row["role"],
+            content=row["content"],
             created_at=row["created_at"],
         )
 
