@@ -31,7 +31,7 @@ class JsonStore:
     def get_knowledge_base(self, kb_id: str) -> KnowledgeBase | None:
         return next((kb for kb in self.list_knowledge_bases() if kb.id == kb_id), None)
 
-    def create_knowledge_base(self, kb: KnowledgeBase) -> KnowledgeBase:
+    def create_knowledge_base(self, kb: KnowledgeBase, *, user_id: str = "system") -> KnowledgeBase:
         with self._lock:
             items = self._read_json("knowledge_bases.json", [])
             if any(item["id"] == kb.id for item in items):
@@ -40,7 +40,7 @@ class JsonStore:
             self._write_json("knowledge_bases.json", [KnowledgeBase.model_validate(item).model_dump() for item in items])
         return kb
 
-    def delete_knowledge_base(self, kb_id: str) -> bool:
+    def delete_knowledge_base(self, kb_id: str, *, user_id: str = "system") -> bool:
         with self._lock:
             items = self._read_json("knowledge_bases.json", [])
             remaining = [item for item in items if item["id"] != kb_id]
@@ -77,7 +77,7 @@ class JsonStore:
             )
             return True
 
-    def add_document(self, document: Document) -> Document:
+    def add_document(self, document: Document, *, user_id: str = "system") -> Document:
         with self._lock:
             items = self._read_json("documents.json", [])
             items.append(document.model_dump())
@@ -147,6 +147,7 @@ class JsonStore:
         document_id: str,
         status: str,
         error: str = "",
+        user_id: str = "system",
     ) -> Document:
         document = self.get_document(kb_id=kb_id, document_id=document_id)
         if not document:
@@ -154,7 +155,7 @@ class JsonStore:
         document = document.model_copy(update={"status": status, "error": error})
         return self.update_document(document=document)
 
-    def delete_document(self, *, kb_id: str, document_id: str) -> bool:
+    def delete_document(self, *, kb_id: str, document_id: str, user_id: str = "system") -> bool:
         with self._lock:
             documents = self._read_json("documents.json", [])
             remaining_documents = [
@@ -331,7 +332,7 @@ class SqliteStore:
             row = conn.execute("select * from knowledge_bases where id = ?", (kb_id,)).fetchone()
         return self._kb_from_row(row) if row else None
 
-    def create_knowledge_base(self, kb: KnowledgeBase) -> KnowledgeBase:
+    def create_knowledge_base(self, kb: KnowledgeBase, *, user_id: str = "system") -> KnowledgeBase:
         with self._lock, self._connect() as conn:
             exists = conn.execute("select 1 from knowledge_bases where id = ?", (kb.id,)).fetchone()
             if exists:
@@ -341,6 +342,7 @@ class SqliteStore:
                 conn,
                 OperationEvent(
                     event_type="knowledge_base.created",
+                    user_id=user_id,
                     tenant_id=kb.tenant_id,
                     knowledge_base_id=kb.id,
                     message=f"Knowledge base '{kb.id}' created",
@@ -349,9 +351,9 @@ class SqliteStore:
             )
         return kb
 
-    def delete_knowledge_base(self, kb_id: str) -> bool:
+    def delete_knowledge_base(self, kb_id: str, *, user_id: str = "system") -> bool:
         with self._lock, self._connect() as conn:
-            row = conn.execute("select id from knowledge_bases where id = ?", (kb_id,)).fetchone()
+            row = conn.execute("select id, tenant_id from knowledge_bases where id = ?", (kb_id,)).fetchone()
             if not row:
                 return False
             conn.execute("delete from knowledge_bases where id = ?", (kb_id,))
@@ -371,19 +373,22 @@ class SqliteStore:
                 conn,
                 OperationEvent(
                     event_type="knowledge_base.deleted",
+                    user_id=user_id,
+                    tenant_id=row["tenant_id"],
                     knowledge_base_id=kb_id,
                     message=f"Knowledge base '{kb_id}' deleted",
                 ),
             )
             return True
 
-    def add_document(self, document: Document) -> Document:
+    def add_document(self, document: Document, *, user_id: str = "system") -> Document:
         with self._lock, self._connect() as conn:
             self._insert_document(conn, document)
             self._insert_operation(
                 conn,
                 OperationEvent(
                     event_type="document.created",
+                    user_id=user_id,
                     tenant_id=self._tenant_for_kb(conn, document.knowledge_base_id),
                     knowledge_base_id=document.knowledge_base_id,
                     document_id=document.id,
@@ -468,6 +473,7 @@ class SqliteStore:
         document_id: str,
         status: str,
         error: str = "",
+        user_id: str = "system",
     ) -> Document:
         document = self.get_document(kb_id=kb_id, document_id=document_id)
         if not document:
@@ -484,6 +490,7 @@ class SqliteStore:
                 conn,
                 OperationEvent(
                     event_type=f"document.{status}",
+                    user_id=user_id,
                     tenant_id=self._tenant_for_kb(conn, kb_id),
                     knowledge_base_id=kb_id,
                     document_id=document_id,
@@ -493,7 +500,7 @@ class SqliteStore:
             )
         return document
 
-    def delete_document(self, *, kb_id: str, document_id: str) -> bool:
+    def delete_document(self, *, kb_id: str, document_id: str, user_id: str = "system") -> bool:
         with self._lock, self._connect() as conn:
             document = conn.execute(
                 "select title from documents where knowledge_base_id = ? and id = ?",
@@ -506,6 +513,7 @@ class SqliteStore:
                 conn,
                 OperationEvent(
                     event_type="document.deleted",
+                    user_id=user_id,
                     tenant_id=self._tenant_for_kb(conn, kb_id),
                     knowledge_base_id=kb_id,
                     document_id=document_id,

@@ -84,7 +84,7 @@ class RagService:
                 raise PermissionError(f"cannot create knowledge base in tenant '{data.tenant_id}'")
             self._require_tags(data.permission_tags, access=access, subject=f"knowledge base '{data.id}'")
         kb = KnowledgeBase(**data.model_dump())
-        return self.store.create_knowledge_base(kb)
+        return self.store.create_knowledge_base(kb, user_id=access.user_id if access else "system")
 
     def list_knowledge_bases(self, access: AccessContext | None = None) -> list[KnowledgeBase]:
         items = self.store.list_knowledge_bases()
@@ -101,7 +101,7 @@ class RagService:
         access = access or AccessContext()
         kb = self._require_kb(kb_id, access=access)
         artifacts = self.store.list_artifacts(kb_id=kb.id, permission_tags=None)
-        deleted = self.store.delete_knowledge_base(kb.id)
+        deleted = self.store.delete_knowledge_base(kb.id, user_id=access.user_id)
         if not deleted:
             raise KeyError(f"knowledge base '{kb_id}' does not exist")
         self.chunk_store.delete_knowledge_base_chunks(kb_id=kb.id)
@@ -127,11 +127,16 @@ class RagService:
             error="",
             **data.model_dump(exclude={"access"}),
         )
-        self.store.add_document(document)
+        self.store.add_document(document, user_id=access.user_id)
         try:
             chunks = await self._build_chunks(document)
             self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=chunks)
-            return self.store.update_document_status(kb_id=kb_id, document_id=document.id, status="indexed")
+            return self.store.update_document_status(
+                kb_id=kb_id,
+                document_id=document.id,
+                status="indexed",
+                user_id=access.user_id,
+            )
         except Exception as exc:
             self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document.id, chunks=[])
             self.store.update_document_status(
@@ -139,6 +144,7 @@ class RagService:
                 document_id=document.id,
                 status="failed",
                 error=self._error_message(exc),
+                user_id=access.user_id,
             )
             raise
 
@@ -228,7 +234,7 @@ class RagService:
         if not document:
             raise KeyError(f"document '{document_id}' does not exist")
         self._require_tags(document.permission_tags, access=access, subject=f"document '{document_id}'")
-        deleted = self.store.delete_document(kb_id=kb_id, document_id=document_id)
+        deleted = self.store.delete_document(kb_id=kb_id, document_id=document_id, user_id=access.user_id)
         if not deleted:
             raise KeyError(f"document '{document_id}' does not exist")
         self.chunk_store.delete_document_chunks(kb_id=kb_id, document_id=document_id)
@@ -246,11 +252,21 @@ class RagService:
         if not document:
             raise KeyError(f"document '{document_id}' does not exist")
         self._require_tags(document.permission_tags, access=access, subject=f"document '{document_id}'")
-        self.store.update_document_status(kb_id=kb_id, document_id=document_id, status="indexing")
+        self.store.update_document_status(
+            kb_id=kb_id,
+            document_id=document_id,
+            status="indexing",
+            user_id=access.user_id,
+        )
         try:
             chunks = await self._build_chunks(document.model_copy(update={"status": "indexing", "error": ""}))
             self.chunk_store.replace_document_chunks(kb_id=kb_id, document_id=document_id, chunks=chunks)
-            self.store.update_document_status(kb_id=kb_id, document_id=document_id, status="indexed")
+            self.store.update_document_status(
+                kb_id=kb_id,
+                document_id=document_id,
+                status="indexed",
+                user_id=access.user_id,
+            )
             return ReindexResponse(document_id=document.id, chunk_count=len(chunks))
         except Exception as exc:
             self.store.update_document_status(
@@ -258,6 +274,7 @@ class RagService:
                 document_id=document_id,
                 status="failed",
                 error=self._error_message(exc),
+                user_id=access.user_id,
             )
             raise
 
@@ -519,12 +536,15 @@ class RagService:
         limit: int = 100,
     ) -> list[OperationEvent]:
         access = access or AccessContext()
+        if kb_id:
+            self._require_kb(kb_id, access=access)
         safe_limit = max(1, min(limit, 200))
         events = self.store.list_operation_events(limit=safe_limit)
         return [
             event
             for event in events
             if event.tenant_id in {"", access.tenant_id}
+            and event.user_id == access.user_id
             and (not event.knowledge_base_id or not kb_id or event.knowledge_base_id == kb_id)
         ][:safe_limit]
 

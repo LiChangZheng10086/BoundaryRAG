@@ -1,6 +1,8 @@
+const SESSION_PROFILE_KEY = "rag_demo_session_profile";
 const state = {
   knowledgeBases: [],
   activeKb: null,
+  activeKbId: "",
   documents: [],
   artifacts: [],
   conversations: [],
@@ -8,9 +10,11 @@ const state = {
   operationEvents: [],
   runtimeConfig: null,
   activeTab: "ask",
-  authToken: window.localStorage.getItem("rag_demo_auth_token") || "",
-  recentKbIds: JSON.parse(window.localStorage.getItem("rag_demo_recent_kbs") || "[]"),
-  conversationIds: JSON.parse(window.localStorage.getItem("rag_demo_conversations") || "{}"),
+  authToken: "",
+  storageNamespace: "",
+  isAuthenticated: false,
+  recentKbIds: [],
+  conversationIds: {},
   requests: {
     knowledgeBases: 0,
     documents: 0,
@@ -43,9 +47,95 @@ const defaultIdentity = {
   tenantId: "default",
   permissionTags: ["hr", "finance", "salary"],
 };
+const defaultDocFilters = {
+  search: "",
+  status: "",
+  tag: "",
+  sort: "newest",
+};
+
+function normalizeIdentity(identity) {
+  return {
+    userId: (identity.userId || defaultIdentity.userId).trim() || defaultIdentity.userId,
+    tenantId: (identity.tenantId || defaultIdentity.tenantId).trim() || defaultIdentity.tenantId,
+    permissionTags: Array.from(new Set(identity.permissionTags || [])).filter(Boolean),
+  };
+}
+
+function storageNamespaceFor(identity) {
+  const normalized = normalizeIdentity(identity);
+  const tags = [...normalized.permissionTags].sort().join(",");
+  return [
+    "rag_demo_state",
+    encodeURIComponent(normalized.tenantId),
+    encodeURIComponent(normalized.userId),
+    encodeURIComponent(tags || "public"),
+  ].join(":");
+}
+
+function scopedStorageKey(key) {
+  if (!state.storageNamespace) {
+    return "";
+  }
+  return `${state.storageNamespace}:${key}`;
+}
+
+function readScopedJson(key, fallback) {
+  const scopedKey = scopedStorageKey(key);
+  if (!scopedKey) {
+    return fallback;
+  }
+  try {
+    const value = window.localStorage.getItem(scopedKey);
+    return value ? JSON.parse(value) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeScopedJson(key, value) {
+  const scopedKey = scopedStorageKey(key);
+  if (!scopedKey) {
+    return;
+  }
+  window.localStorage.setItem(scopedKey, JSON.stringify(value));
+}
+
+function readSessionProfile() {
+  try {
+    const value = window.sessionStorage.getItem(SESSION_PROFILE_KEY);
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionProfile(profile) {
+  window.sessionStorage.setItem(SESSION_PROFILE_KEY, JSON.stringify(profile));
+}
+
+function clearSessionProfile() {
+  window.sessionStorage.removeItem(SESSION_PROFILE_KEY);
+}
+
+function hydrateScopedState() {
+  state.recentKbIds = readScopedJson("recent_kbs", []);
+  state.conversationIds = readScopedJson("conversations", {});
+  state.activeKbId = readScopedJson("active_kb", "");
+  state.activeTab = readScopedJson("active_tab", "ask");
+  state.docFilters = {
+    ...defaultDocFilters,
+    ...readScopedJson("doc_filters", defaultDocFilters),
+  };
+}
+
+function persistScopedState(key, value) {
+  writeScopedJson(key, value);
+}
 
 const els = {
   activeKbLabel: $("activeKbLabel"),
+  appShell: $("appShell"),
   answerBox: $("answerBox"),
   artifactBox: $("artifactBox"),
   artifactPreview: $("artifactPreview"),
@@ -78,6 +168,15 @@ const els = {
   kbSkills: $("kbSkills"),
   kbTenantId: $("kbTenantId"),
   modelStatus: $("modelStatus"),
+  loginForm: $("loginForm"),
+  loginHint: $("loginHint"),
+  loginPermissionTags: $("loginPermissionTags"),
+  loginScreen: $("loginScreen"),
+  loginSubmitBtn: $("loginSubmitBtn"),
+  loginTenantId: $("loginTenantId"),
+  loginToken: $("loginToken"),
+  loginUserId: $("loginUserId"),
+  logoutBtn: $("logoutBtn"),
   question: $("question"),
   queryForm: $("queryForm"),
   querySubmit: $("querySubmit"),
@@ -106,9 +205,6 @@ const els = {
   selectedSkillPill: $("selectedSkillPill"),
   toast: $("toast"),
   traceId: $("traceId"),
-  authToken: $("authToken"),
-  saveAuthTokenBtn: $("saveAuthTokenBtn"),
-  clearAuthTokenBtn: $("clearAuthTokenBtn"),
   uploadFile: $("uploadFile"),
   uploadForm: $("uploadForm"),
   uploadPermissionTags: $("uploadPermissionTags"),
@@ -286,34 +382,151 @@ function decodeTokenPayload(token) {
   }
 }
 
-function applyTokenIdentity(token) {
-  state.identity = { ...defaultIdentity };
+function identityFromToken(token) {
   const payload = decodeTokenPayload(token);
   if (!payload) {
-    return;
+    throw new Error("JWT Token 格式不可读，无法登录。");
   }
-  state.identity.userId = payload.user_id || payload.sub || state.identity.userId;
-  state.identity.tenantId = payload.tenant_id || state.identity.tenantId;
-  if (Array.isArray(payload.permission_tags)) {
-    state.identity.permissionTags = payload.permission_tags;
+  return normalizeIdentity({
+    userId: payload.user_id || payload.sub || defaultIdentity.userId,
+    tenantId: payload.tenant_id || defaultIdentity.tenantId,
+    permissionTags: Array.isArray(payload.permission_tags) ? payload.permission_tags : defaultIdentity.permissionTags,
+  });
+}
+
+function identityFromForm() {
+  return normalizeIdentity({
+    userId: els.loginUserId.value.trim() || defaultIdentity.userId,
+    tenantId: els.loginTenantId.value.trim() || defaultIdentity.tenantId,
+    permissionTags: parseTags(els.loginPermissionTags.value),
+  });
+}
+
+function buildSessionProfile({ token, identity }) {
+  return {
+    token,
+    identity,
+    storageNamespace: storageNamespaceFor(identity),
+  };
+}
+
+function restoreSessionProfile(profile) {
+  if (!profile) {
+    return false;
   }
+  const identity = normalizeIdentity(profile.identity || defaultIdentity);
+  const token = profile.token || "";
+  state.isAuthenticated = true;
+  state.authToken = token;
+  state.identity = identity;
+  state.storageNamespace = profile.storageNamespace || storageNamespaceFor(identity);
+  hydrateScopedState();
+  return true;
+}
+
+function activateSession({ token, identity }) {
+  const normalizedIdentity = normalizeIdentity(identity);
+  state.isAuthenticated = true;
+  state.authToken = token;
+  state.identity = normalizedIdentity;
+  state.storageNamespace = storageNamespaceFor(normalizedIdentity);
+  hydrateScopedState();
+  state.activeKb = null;
+  if (state.activeKbId) {
+    state.activeKb = state.knowledgeBases.find((kb) => kb.id === state.activeKbId) || null;
+  }
+  if (state.activeKb && state.activeKb.tenant_id !== state.identity.tenantId) {
+    state.activeKb = null;
+  }
+  writeSessionProfile(buildSessionProfile({ token, identity: normalizedIdentity }));
+  renderShell();
+}
+
+function clearSession() {
+  Object.keys(state.requests).forEach((key) => {
+    state.requests[key] += 1;
+  });
+  if (state.queryAbortController) {
+    state.queryAbortController.abort();
+    state.queryAbortController = null;
+  }
+  state.isAuthenticated = false;
+  state.authToken = "";
+  state.storageNamespace = "";
+  state.recentKbIds = [];
+  state.conversationIds = {};
+  state.activeKbId = "";
+  state.activeKb = null;
+  state.documents = [];
+  state.artifacts = [];
+  state.conversations = [];
+  state.conversationMessages = [];
+  state.operationEvents = [];
+  state.activeTab = "ask";
+  state.docFilters = { ...defaultDocFilters };
+  state.identity = { ...defaultIdentity };
+  clearSessionProfile();
+  renderShell();
 }
 
 function renderAuthStatus() {
   const payload = decodeTokenPayload(state.authToken);
-  if (!state.authToken) {
-    els.authModeLabel.textContent = "Demo 请求头";
-    els.tokenExpiry.textContent = "未使用 JWT。生产环境可粘贴 Token 切换为 Bearer 鉴权。";
+  const modeLabel = state.authToken ? "Bearer Token 登录" : "演示登录";
+  if (!state.isAuthenticated) {
+    els.authModeLabel.textContent = "未登录";
+    els.tokenExpiry.textContent = "请先在登录页完成身份验证。";
     return;
   }
-  els.authModeLabel.textContent = payload ? "Bearer Token 已启用" : "Token 格式不可读";
+  els.authModeLabel.textContent = payload ? modeLabel : "演示登录";
   if (!payload?.exp) {
-    els.tokenExpiry.textContent = "Token 已保存，但未发现过期时间。";
+    els.tokenExpiry.textContent = state.authToken
+      ? "Token 已保存，但未发现过期时间。"
+      : "当前会话使用演示身份，不依赖 Token。";
     return;
   }
   const expiresAt = new Date(payload.exp * 1000);
   const expired = expiresAt.getTime() <= Date.now();
   els.tokenExpiry.textContent = `${expired ? "已过期" : "过期时间"}：${formatTime(expiresAt.toISOString())}`;
+}
+
+function renderLoginHint() {
+  if (!els.loginHint) {
+    return;
+  }
+  const authMode = state.runtimeConfig?.auth_mode || "demo";
+  const redis = state.runtimeConfig?.cache_store === "redis"
+    ? (state.runtimeConfig.cache_ready ? "Redis 已连接，可撤销 JWT。" : "Redis 未连接，退出登录仅清本地。")
+    : "Redis 未启用，退出登录仅清本地。";
+  els.loginHint.textContent = authMode === "jwt"
+    ? `当前后端要求 JWT 登录；请粘贴 Bearer Token 后进入。${redis}`
+    : `当前后端允许演示身份登录；也可以粘贴 JWT 切换为 Bearer 鉴权。${redis}`;
+}
+
+function syncControlsFromState() {
+  els.docSearch.value = state.docFilters.search;
+  els.docStatusFilter.value = state.docFilters.status;
+  els.docTagFilter.value = state.docFilters.tag;
+  els.docSort.value = state.docFilters.sort;
+}
+
+function renderShell() {
+  if (els.loginScreen) {
+    els.loginScreen.hidden = state.isAuthenticated;
+  }
+  if (els.appShell) {
+    els.appShell.hidden = !state.isAuthenticated;
+  }
+  document.body.classList.toggle("auth-locked", !state.isAuthenticated);
+  if (!state.isAuthenticated) {
+    els.loginUserId.value = defaultIdentity.userId;
+    els.loginTenantId.value = defaultIdentity.tenantId;
+    els.loginPermissionTags.value = defaultIdentity.permissionTags.join(", ");
+    els.loginToken.value = "";
+  } else {
+    syncControlsFromState();
+  }
+  renderLoginHint();
+  renderAuthStatus();
 }
 
 function renderModelStatus() {
@@ -326,18 +539,22 @@ function renderModelStatus() {
 
   const llmReady = config.llm_ready ? "ready" : "missing key";
   const embeddingReady = config.embedding_ready ? "ready" : "missing key";
+  const cacheReady = config.cache_store === "disabled" ? "disabled" : (config.cache_ready ? "ready" : "unavailable");
   els.modelStatus.className = `model-status ${config.llm_provider === "deepseek" && config.llm_ready ? "ready" : "warn"}`;
   els.modelStatus.textContent = [
     `Metadata: ${config.metadata_store || "sqlite"} / ${config.metadata_store_uri || ".rag_data/boundaryrag.sqlite3"}`,
     `Vector: ${config.vector_store || "milvus-lite"} / ${config.vector_store_collection || "boundaryrag_chunks"}`,
+    `Cache: ${config.cache_store || "redis"} / ${config.cache_store_uri || "redis://localhost:6379/0"} / ${cacheReady}`,
     `LLM: ${config.llm_provider} / ${config.llm_model} / ${llmReady}`,
     `Embedding: ${config.embedding_provider} / ${config.embedding_model} / ${embeddingReady}`,
   ].join(" · ");
 }
 
 function rememberKnowledgeBase(kbId) {
+  state.activeKbId = kbId;
   state.recentKbIds = [kbId, ...state.recentKbIds.filter((id) => id !== kbId)].slice(0, 5);
-  window.localStorage.setItem("rag_demo_recent_kbs", JSON.stringify(state.recentKbIds));
+  persistScopedState("active_kb", state.activeKbId);
+  persistScopedState("recent_kbs", state.recentKbIds);
 }
 
 function activeConversationId(kbId) {
@@ -352,13 +569,79 @@ function rememberConversation(kbId, conversationId) {
     ...state.conversationIds,
     [kbId]: conversationId,
   };
-  window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
+  persistScopedState("conversations", state.conversationIds);
+}
+
+async function revokeAuthTokenOnServer() {
+  if (!state.authToken) {
+    return "";
+  }
+  try {
+    await api("/auth/logout", { method: "POST" });
+    return "Token 已在服务端撤销。";
+  } catch (error) {
+    const message = error.message || "";
+    if (message.includes("Redis") || message.includes("disabled") || message.includes("unavailable")) {
+      return "服务端未启用 Redis，已仅清理本地 Token。";
+    }
+    if (message.includes("JWT") || message.includes("expired") || message.includes("invalid")) {
+      return "Token 已失效，已清理本地 Token。";
+    }
+    throw error;
+  }
+}
+
+async function loadCurrentUserWorkspace() {
+  await loadKnowledgeBases();
+  await loadDocuments();
+  await loadArtifacts();
+  await loadConversations();
+  await loadOperationEvents();
+}
+
+async function loginFromForm() {
+  const token = els.loginToken.value.trim();
+  if (!token && state.runtimeConfig?.auth_mode === "jwt") {
+    throw new Error("当前环境要求 JWT 登录，请先粘贴 Bearer Token。");
+  }
+
+  const identity = token ? identityFromToken(token) : identityFromForm();
+  const payload = token ? decodeTokenPayload(token) : null;
+  if (payload?.exp && payload.exp * 1000 <= Date.now()) {
+    throw new Error("JWT Token 已过期，请重新登录。");
+  }
+
+  activateSession({ token, identity });
+  try {
+    await loadCurrentUserWorkspace();
+  } catch (error) {
+    clearSession();
+    throw error;
+  }
+
+  renderShell();
+  setOperationStatus(`已登录为 ${state.identity.userId} / ${state.identity.tenantId}。`);
+  showToast(`已进入 ${state.identity.userId} 的独立工作区。`);
+}
+
+async function logoutToLogin() {
+  let serverMessage = "";
+  try {
+    serverMessage = await revokeAuthTokenOnServer();
+  } catch {
+    serverMessage = "服务端退出登录失败，已仅清理本地会话。";
+  } finally {
+    clearSession();
+    renderShell();
+    showToast(serverMessage || "已退出登录。");
+    setOperationStatus("请先在登录页完成登录。");
+  }
 }
 
 function forgetConversation(kbId) {
   const { [kbId]: _conversationId, ...remaining } = state.conversationIds;
   state.conversationIds = remaining;
-  window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
+  persistScopedState("conversations", state.conversationIds);
 }
 
 function renderKnowledgeBases() {
@@ -452,15 +735,17 @@ function renderKnowledgeBases() {
         state.recentKbIds = state.recentKbIds.filter((id) => id !== kb.id);
         const { [kb.id]: _deletedConversationId, ...remainingConversationIds } = state.conversationIds;
         state.conversationIds = remainingConversationIds;
-        window.localStorage.setItem("rag_demo_recent_kbs", JSON.stringify(state.recentKbIds));
-        window.localStorage.setItem("rag_demo_conversations", JSON.stringify(state.conversationIds));
+        persistScopedState("recent_kbs", state.recentKbIds);
+        persistScopedState("conversations", state.conversationIds);
         if (state.activeKb?.id === kb.id) {
           state.activeKb = null;
+          state.activeKbId = "";
           state.documents = [];
           state.artifacts = [];
           state.conversations = [];
           state.conversationMessages = [];
           state.operationEvents = [];
+          persistScopedState("active_kb", "");
           if (state.queryAbortController) {
             state.queryAbortController.abort();
             state.queryAbortController = null;
@@ -483,12 +768,27 @@ function renderKnowledgeBases() {
 }
 
 function renderBoundary() {
-  els.identityUser.textContent = state.identity.userId;
-  els.identityTenant.textContent = state.identity.tenantId;
-  els.identityTags.textContent = state.identity.permissionTags.join(", ") || "-";
-  els.settingsIdentity.textContent = `${state.identity.userId} / ${state.identity.tenantId} / ${state.identity.permissionTags.join(", ") || "-"}`;
+  const identityLabel = `${state.identity.userId} / ${state.identity.tenantId} / ${state.identity.permissionTags.join(", ") || "-"}`;
+  els.identityUser.textContent = state.isAuthenticated ? state.identity.userId : "未登录";
+  els.identityTenant.textContent = state.isAuthenticated ? state.identity.tenantId : "-";
+  els.identityTags.textContent = state.isAuthenticated ? (state.identity.permissionTags.join(", ") || "-") : "-";
+  els.settingsIdentity.textContent = state.isAuthenticated ? identityLabel : "请先登录";
   renderAuthStatus();
   renderModelStatus();
+
+  if (!state.isAuthenticated) {
+    els.activeKbLabel.textContent = "尚未登录";
+    els.sidebarActiveKb.textContent = "未登录";
+    els.sidebarBoundaryMeta.textContent = "请先在登录页完成身份认证。";
+    els.boundaryTitle.textContent = "登录后开始";
+    els.boundarySkills.textContent = "skills: -";
+    els.settingsKnowledgeBase.textContent = "未登录";
+    els.settingsKnowledgeBaseMeta.textContent = "登录后会显示当前知识库、租户和权限标签。";
+    els.querySubmit.disabled = true;
+    els.skillSubmit.disabled = true;
+    els.skillSubmit.textContent = "执行技能";
+    return;
+  }
 
   if (!state.activeKb) {
     els.activeKbLabel.textContent = "尚未选择知识库";
@@ -772,14 +1072,17 @@ async function loadKnowledgeBases() {
     return;
   }
   state.knowledgeBases = knowledgeBases;
-  if (state.activeKb) {
-    state.activeKb = state.knowledgeBases.find((kb) => kb.id === state.activeKb.id) || null;
-  }
-  if (!state.activeKb && state.knowledgeBases.length) {
-    state.activeKb = state.knowledgeBases[0];
-  }
+  const preferredKbId = state.activeKbId || state.activeKb?.id || "";
+  state.activeKb = state.knowledgeBases.find((kb) => kb.id === preferredKbId) || state.knowledgeBases[0] || null;
   if (state.activeKb && state.activeKb.tenant_id !== state.identity.tenantId) {
     state.activeKb = null;
+  }
+  if (state.activeKb) {
+    state.activeKbId = state.activeKb.id;
+    persistScopedState("active_kb", state.activeKbId);
+  } else if (preferredKbId) {
+    state.activeKbId = "";
+    persistScopedState("active_kb", "");
   }
   renderAll();
 }
@@ -787,6 +1090,7 @@ async function loadKnowledgeBases() {
 async function loadRuntimeConfig() {
   state.runtimeConfig = await api("/runtime-config");
   renderModelStatus();
+  renderLoginHint();
 }
 
 async function loadDocuments() {
@@ -1037,6 +1341,7 @@ function formatTime(value) {
 document.querySelectorAll("[data-tab]").forEach((button) => {
   button.addEventListener("click", () => {
     state.activeTab = button.dataset.tab;
+    persistScopedState("active_tab", state.activeTab);
     renderTabs();
   });
 });
@@ -1072,6 +1377,7 @@ els.kbId.addEventListener("input", () => {
 ].forEach(([control, key]) => {
   control.addEventListener("input", () => {
     state.docFilters[key] = control.value;
+    persistScopedState("doc_filters", state.docFilters);
     renderDocuments();
   });
 });
@@ -1192,38 +1498,17 @@ els.reloadOperationsBtn.addEventListener("click", () => {
 
 els.skillName.addEventListener("change", renderBoundary);
 
-els.authToken.value = state.authToken;
-applyTokenIdentity(state.authToken);
-
-els.saveAuthTokenBtn.addEventListener("click", () => {
-  state.authToken = els.authToken.value.trim();
-  if (state.authToken) {
-    window.localStorage.setItem("rag_demo_auth_token", state.authToken);
-    applyTokenIdentity(state.authToken);
-    showToast("JWT Token 已保存，后续请求会使用 Bearer 鉴权。");
-  } else {
-    window.localStorage.removeItem("rag_demo_auth_token");
-    applyTokenIdentity("");
-    showToast("JWT Token 已清空，将使用 demo 请求头。");
-  }
-  renderBoundary();
-  loadKnowledgeBases()
-    .then(loadConversations)
-    .catch((error) => showToast(error.message));
-  loadOperationEvents().catch((error) => showToast(error.message));
+els.loginForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  handleButton(els.loginSubmitBtn, async () => {
+    await loginFromForm();
+  });
 });
 
-els.clearAuthTokenBtn.addEventListener("click", () => {
-  state.authToken = "";
-  els.authToken.value = "";
-  window.localStorage.removeItem("rag_demo_auth_token");
-  applyTokenIdentity("");
-  showToast("JWT Token 已清除，将使用 demo 请求头。");
-  renderBoundary();
-  loadKnowledgeBases()
-    .then(loadConversations)
-    .catch((error) => showToast(error.message));
-  loadOperationEvents().catch((error) => showToast(error.message));
+els.logoutBtn.addEventListener("click", () => {
+  handleButton(els.logoutBtn, async () => {
+    await logoutToLogin();
+  });
 });
 
 els.newConversationBtn.addEventListener("click", () => {
@@ -1402,10 +1687,22 @@ els.skillForm.addEventListener("submit", (event) => {
   });
 });
 
-loadRuntimeConfig()
-  .then(loadKnowledgeBases)
-  .then(loadDocuments)
-  .then(loadArtifacts)
-  .then(loadConversations)
-  .then(loadOperationEvents)
-  .catch((error) => showToast(error.message));
+async function bootstrap() {
+  await loadRuntimeConfig();
+  const session = readSessionProfile();
+  if (restoreSessionProfile(session)) {
+    renderShell();
+    try {
+      await loadCurrentUserWorkspace();
+      setOperationStatus(`已恢复 ${state.identity.userId} / ${state.identity.tenantId} 的登录会话。`);
+      return;
+    } catch (error) {
+      clearSession();
+      showToast(`登录会话已失效：${error.message}`);
+    }
+  }
+  renderShell();
+  renderBoundary();
+}
+
+bootstrap().catch((error) => showToast(error.message));

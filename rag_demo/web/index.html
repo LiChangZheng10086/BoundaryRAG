@@ -7,7 +7,55 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="shell">
+    <section id="loginScreen" class="login-screen" aria-label="登录">
+      <div class="login-copy">
+        <p class="eyebrow">Boundary Login</p>
+        <h1>先登录，再进入知识库边界</h1>
+        <p>
+          每个用户都会进入独立工作区：最近知识库、历史对话、前端缓存和操作视图都按用户、租户、权限标签隔离。
+        </p>
+        <div class="login-points">
+          <span>JWT / Demo 双模式</span>
+          <span>Tenant 隔离</span>
+          <span>权限标签过滤</span>
+          <span>本地状态按用户分区</span>
+        </div>
+      </div>
+
+      <form id="loginForm" class="login-card">
+        <div>
+          <p class="eyebrow">Sign In</p>
+          <h2>登录到 BoundaryRAG</h2>
+          <p id="loginHint" class="login-hint">正在读取认证模式...</p>
+        </div>
+
+        <label>
+          Bearer Token
+          <textarea id="loginToken" rows="5" placeholder="JWT 模式请粘贴 Token；Demo 模式可留空"></textarea>
+        </label>
+
+        <div class="login-fields">
+          <label>
+            用户 ID
+            <input id="loginUserId" autocomplete="username" placeholder="demo-user" />
+          </label>
+          <label>
+            租户 ID
+            <input id="loginTenantId" placeholder="default" />
+          </label>
+        </div>
+
+        <label>
+          权限标签
+          <input id="loginPermissionTags" placeholder="hr, finance, salary" />
+          <small class="field-hint">如果填写 JWT，用户、租户和权限会优先从 Token 中读取。</small>
+        </label>
+
+        <button id="loginSubmitBtn" type="submit">登录并进入系统</button>
+      </form>
+    </section>
+
+    <main id="appShell" class="shell" hidden>
       <section class="hero panel">
         <div>
           <p class="eyebrow">Enterprise Knowledge Boundary</p>
@@ -326,18 +374,10 @@
                 </div>
 	                <div class="setting-tile">
 	                  <span>登录状态</span>
-	                  <strong id="authModeLabel">Demo 请求头</strong>
-	                  <p id="tokenExpiry">未使用 JWT。生产环境可粘贴 Token 切换为 Bearer 鉴权。</p>
-	                  <details class="token-details">
-	                    <summary>管理 Token</summary>
-	                    <label>
-	                      Bearer Token
-	                      <textarea id="authToken" rows="4" placeholder="粘贴 JWT 后会通过 Authorization: Bearer 发送"></textarea>
-	                    </label>
-	                  </details>
+	                  <strong id="authModeLabel">未登录</strong>
+	                  <p id="tokenExpiry">请先在登录页完成身份验证。</p>
 	                  <div class="document-actions">
-	                    <button id="saveAuthTokenBtn" class="ghost" type="button">保存 Token</button>
-	                    <button id="clearAuthTokenBtn" class="danger" type="button">退出登录</button>
+	                    <button id="logoutBtn" class="danger" type="button">退出登录</button>
 	                  </div>
 	                </div>
                 <div class="setting-tile">

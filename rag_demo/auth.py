@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from uuid import uuid4
 from typing import Any
 
 from rag_demo.config import Settings
@@ -20,6 +21,10 @@ class AuthConfigError(RuntimeError):
 
 
 def decode_access_token(token: str, settings: Settings) -> AccessContext:
+    return access_from_claims(decode_access_token_payload(token, settings))
+
+
+def decode_access_token_payload(token: str, settings: Settings) -> dict[str, Any]:
     if not settings.jwt_secret:
         raise AuthConfigError("RAG_JWT_SECRET is required when JWT authentication is used")
 
@@ -37,7 +42,7 @@ def decode_access_token(token: str, settings: Settings) -> AccessContext:
         raise AuthError("JWT signature is invalid")
 
     _validate_registered_claims(payload, settings=settings)
-    return _access_from_claims(payload)
+    return payload
 
 
 def sign_access_token(
@@ -52,6 +57,7 @@ def sign_access_token(
 
     now = int(time.time()) if issued_at is None else issued_at
     payload: dict[str, Any] = {
+        "jti": f"jwt_{uuid4().hex}",
         "sub": access.user_id,
         "tenant_id": access.tenant_id,
         "permission_tags": access.permission_tags,
@@ -68,6 +74,26 @@ def sign_access_token(
     signed = f"{header_segment}.{payload_segment}".encode("ascii")
     signature_segment = _b64_encode(_sign(signed, settings.jwt_secret))
     return f"{header_segment}.{payload_segment}.{signature_segment}"
+
+
+def token_cache_id(token: str, payload: dict[str, Any]) -> str:
+    jti = payload.get("jti")
+    if isinstance(jti, str) and jti.strip():
+        return jti
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def token_expires_in_seconds(payload: dict[str, Any], *, now: int | None = None) -> int:
+    current = int(time.time()) if now is None else now
+    exp = payload.get("exp")
+    if not isinstance(exp, int | float):
+        raise AuthError("JWT exp claim is required")
+    ttl = int(exp) - current
+    return ttl if ttl > 0 else 0
+
+
+def access_from_claims(payload: dict[str, Any]) -> AccessContext:
+    return _access_from_claims(payload)
 
 
 def _split_token(token: str) -> tuple[str, str, str]:

@@ -34,6 +34,11 @@ class Settings:
     jwt_issuer: str | None = field(default_factory=lambda: os.getenv("RAG_JWT_ISSUER"))
     jwt_audience: str | None = field(default_factory=lambda: os.getenv("RAG_JWT_AUDIENCE"))
     jwt_leeway_seconds: int = field(default_factory=lambda: int(os.getenv("RAG_JWT_LEEWAY_SECONDS", "30")))
+    redis_enabled: bool = field(default_factory=lambda: _env_bool("RAG_REDIS_ENABLED", False))
+    redis_url: str = field(default_factory=lambda: os.getenv("RAG_REDIS_URL", "redis://localhost:6379/0"))
+    redis_key_prefix: str = field(default_factory=lambda: os.getenv("RAG_REDIS_KEY_PREFIX", "boundaryrag"))
+    redis_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("RAG_REDIS_TIMEOUT_SECONDS", "1")))
+    redis_default_ttl_seconds: int = field(default_factory=lambda: int(os.getenv("RAG_REDIS_DEFAULT_TTL_SECONDS", "3600")))
     embedding_provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "local"))
     dashscope_api_key: str | None = field(default_factory=lambda: os.getenv("DASHSCOPE_API_KEY"))
     dashscope_embedding_model: str = field(
@@ -49,6 +54,13 @@ class Settings:
     deepseek_api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY"))
     deepseek_model: str = field(default_factory=lambda: os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"))
     deepseek_base_url: str = field(default_factory=lambda: os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_settings() -> Settings:

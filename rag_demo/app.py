@@ -1,12 +1,21 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from rag_demo.auth import AuthConfigError, AuthError, decode_access_token
+from rag_demo.auth import (
+    AuthConfigError,
+    AuthError,
+    access_from_claims,
+    decode_access_token_payload,
+    token_cache_id,
+    token_expires_in_seconds,
+)
+from rag_demo.cache import RedisCache, RedisUnavailableError, create_redis_cache
 from rag_demo.config import get_settings
 from rag_demo.document_parsers import UploadSecurityPolicy
 from rag_demo.embeddings import create_embedding_provider
@@ -23,6 +32,7 @@ from rag_demo.models import (
     KnowledgeBase,
     KnowledgeBaseCreate,
     OperationEvent,
+    LogoutResponse,
     QueryRequest,
     QueryResponse,
     ReindexResponse,
@@ -35,7 +45,15 @@ from rag_demo.store import SqliteStore
 from rag_demo.vector_store import create_chunk_store
 
 
-app = FastAPI(title="RAG Demo", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        yield
+    finally:
+        await get_redis_cache().close()
+
+
+app = FastAPI(title="RAG Demo", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="rag_demo/web"), name="static")
 
 
@@ -43,26 +61,35 @@ def parse_tag_string(value: str) -> list[str]:
     return [tag.strip() for tag in value.split(",") if tag.strip()]
 
 
-def get_access_context(
+@lru_cache
+def get_redis_cache() -> RedisCache:
+    return create_redis_cache(get_settings())
+
+
+async def get_access_context(
     authorization: str | None = Header(default=None),
     x_user_id: str = Header(default="demo-user"),
     x_tenant_id: str = Header(default="default"),
     x_permission_tags: str = Header(default=""),
+    cache: RedisCache = Depends(get_redis_cache),
 ) -> AccessContext:
     settings = get_settings()
     if settings.auth_mode not in {"demo", "jwt"}:
         raise HTTPException(status_code=500, detail=f"unsupported RAG_AUTH_MODE '{settings.auth_mode}'")
 
     if authorization:
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token:
-            raise HTTPException(status_code=401, detail="Authorization header must be a Bearer token")
+        token = require_bearer_token(authorization)
         try:
-            return decode_access_token(token, settings)
+            payload = decode_access_token_payload(token, settings)
+            if await cache.is_jwt_revoked(token_cache_id(token, payload)):
+                raise HTTPException(status_code=401, detail="JWT token has been revoked")
+            return access_from_claims(payload)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         except AuthConfigError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except RedisUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if settings.auth_mode == "jwt":
         raise HTTPException(status_code=401, detail="missing Bearer token")
@@ -72,6 +99,15 @@ def get_access_context(
         tenant_id=x_tenant_id or "default",
         permission_tags=parse_tag_string(x_permission_tags),
     )
+
+
+def require_bearer_token(authorization: str | None) -> str:
+    if not authorization:
+        raise HTTPException(status_code=401, detail="missing Bearer token")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Authorization header must be a Bearer token")
+    return token
 
 
 @app.get("/", include_in_schema=False)
@@ -107,13 +143,18 @@ def get_service() -> RagService:
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health(cache: RedisCache = Depends(get_redis_cache)) -> dict[str, str]:
+    redis_status = await cache.status()
+    redis_value = "disabled"
+    if redis_status.enabled:
+        redis_value = "ok" if redis_status.ready else "unavailable"
+    return {"status": "ok", "redis": redis_value}
 
 
 @app.get("/runtime-config", response_model=RuntimeConfig)
-async def runtime_config() -> RuntimeConfig:
+async def runtime_config(cache: RedisCache = Depends(get_redis_cache)) -> RuntimeConfig:
     settings = get_settings()
+    redis_status = await cache.status()
     return RuntimeConfig(
         auth_mode=settings.auth_mode,
         metadata_store="sqlite",
@@ -121,6 +162,9 @@ async def runtime_config() -> RuntimeConfig:
         vector_store="milvus-lite",
         vector_store_uri=str(settings.milvus_uri),
         vector_store_collection=settings.milvus_collection,
+        cache_store="redis" if redis_status.enabled else "disabled",
+        cache_store_uri=redis_status.url,
+        cache_ready=redis_status.ready,
         llm_provider=settings.llm_provider,
         llm_model=settings.deepseek_model if settings.llm_provider == "deepseek" else "local-boundary",
         llm_ready=settings.llm_provider != "deepseek" or bool(settings.deepseek_api_key),
@@ -132,6 +176,31 @@ async def runtime_config() -> RuntimeConfig:
         ),
         embedding_ready=settings.embedding_provider != "dashscope" or bool(settings.dashscope_api_key),
     )
+
+
+@app.post("/auth/logout", response_model=LogoutResponse)
+async def logout(
+    authorization: str | None = Header(default=None),
+    cache: RedisCache = Depends(get_redis_cache),
+) -> LogoutResponse:
+    settings = get_settings()
+    token = require_bearer_token(authorization)
+    try:
+        payload = decode_access_token_payload(token, settings)
+        token_id = token_cache_id(token, payload)
+        ttl_seconds = token_expires_in_seconds(payload)
+        await cache.revoke_jwt(token_id, ttl_seconds=ttl_seconds)
+        return LogoutResponse(
+            revoked=True,
+            token_id=token_id,
+            expires_at=int(payload.get("exp") or 0),
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except AuthConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RedisUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/knowledge-bases", response_model=KnowledgeBase)

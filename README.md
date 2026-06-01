@@ -55,6 +55,7 @@ Word/PPT 不是把原文简单拼接成文件，而是走一条“检索增强�
 | 前端 | 原生 HTML、CSS、JavaScript |
 | 认证 | Demo Header、JWT HS256 |
 | 业务存储 | SQLite |
+| 缓存 / 会话短状态 | Redis |
 | 向量存储 | Milvus Lite，本地文件模式 |
 | 向量模型 | DashScope `MultiModalEmbedding` 或本地 hash embedding |
 | 大模型 | DeepSeek Chat Completions 或本地 boundary LLM |
@@ -117,6 +118,14 @@ flowchart LR
 - DeepSeek 模式下使用 `stream=true` 返回流式内容。
 - 前端问答区默认不展示来源卡片，来源仅作为内部 RAG 依据和后端返回数据使用。
 - 会话会保存上下文，刷新页面后可以继续查看历史对话。
+- 退出登录时会把 JWT 写入 Redis 黑名单，避免仅靠前端清 Token。
+
+### 登录页与用户隔离
+
+- 启动后先进入独立登录页，登录后才会打开主工作台。
+- 支持 JWT 登录和演示身份登录，登录态按 `user_id + tenant_id + permission_tags` 划分本地命名空间。
+- 最近知识库、历史对话、当前知识库、筛选条件都会按用户隔离保存，不会串到其他登录用户。
+- 退出登录会回到登录页，并清理当前会话态。
 
 ### 文档生成
 
@@ -171,6 +180,21 @@ Milvus 存储字段包括：
 - `created_at`
 
 不同 embedding 维度会使用带维度后缀的 collection，例如 `boundaryrag_chunks_d384`。
+
+### Redis 短期状态
+
+默认路径不是本地文件，而是独立 Redis 服务：
+
+```text
+redis://localhost:6379/0
+```
+
+当前项目把 Redis 用在：
+
+- JWT 退出登录黑名单
+- 后续可扩展的限流、短期缓存、任务状态
+
+Redis 只保存短期状态，不替代 SQLite 的业务实体化存储。
 
 ## 文档处理与切分
 
@@ -247,6 +271,14 @@ pip install -e ".[dev]"
 
 ### 2. 启动服务
 
+如果启用 Redis，可以先启动本地 Redis：
+
+```bash
+docker run --name boundaryrag-redis -p 6379:6379 -d redis:7
+```
+
+然后启动 FastAPI：
+
 ```bash
 uvicorn rag_demo.app:app --reload
 ```
@@ -292,9 +324,22 @@ RAG_JWT_SECRET=换成足够长的随机密钥
 RAG_JWT_ISSUER=
 RAG_JWT_AUDIENCE=
 RAG_JWT_LEEWAY_SECONDS=30
+
+RAG_REDIS_ENABLED=false
+RAG_REDIS_URL=redis://localhost:6379/0
+RAG_REDIS_KEY_PREFIX=boundaryrag
+RAG_REDIS_TIMEOUT_SECONDS=1
+RAG_REDIS_DEFAULT_TTL_SECONDS=3600
 ```
 
 ## 认证方式
+
+### 选型建议
+
+- 如果你想快速做一个标准 REST API，`FastAPI` 自带的 `OAuth2PasswordBearer` + JWT 就够用。
+- 如果你想要现成的注册、登录、注销、重置密码、用户管理，`FastAPI Users` 更省事。
+- 如果你要接企业单点登录或第三方登录，`Authlib` 更合适，尤其是 OIDC/OAuth2 场景。
+- 这个项目当前采用的是自定义 JWT + Redis 黑名单，原因是它更轻，适合知识库类 MVP，同时保留了后续升级空间。
 
 ### Demo 模式
 
@@ -317,12 +362,15 @@ X-Permission-Tags: hr,finance
 
 如果配置了 `RAG_JWT_ISSUER` 或 `RAG_JWT_AUDIENCE`，后端会校验 issuer 和 audience。
 
+如果启用了 Redis，退出登录会同时把当前 JWT 加入 Redis 黑名单，后续同一 token 会被拒绝。
+
 ## API 速览
 
 ### 运行状态
 
 - `GET /health`
 - `GET /runtime-config`
+- `POST /auth/logout`
 - `GET /operation-events`
 
 ### 知识库
@@ -377,6 +425,7 @@ X-Conversation-Id: conv_xxx
 
 ## 前端能力
 
+- 独立登录页，登录后再进入主工作台。
 - 左侧支持知识库搜索、最近使用、当前知识库边界摘要。
 - 创建知识库是次要操作，不会挤占主要使用路径。
 - 问答、文档、生成、设置页面分区展示，避免结果串页。

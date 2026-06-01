@@ -213,9 +213,18 @@ class RuntimeConfig(BaseModel):
     vector_store: str
     vector_store_uri: str
     vector_store_collection: str
+    cache_store: str
+    cache_store_uri: str
+    cache_ready: bool
     llm_provider: str
     llm_model: str
     llm_ready: bool
     embedding_provider: str
     embedding_model: str
     embedding_ready: bool
+
+
+class LogoutResponse(BaseModel):
+    revoked: bool
+    token_id: str = ""
+    expires_at: int = 0
