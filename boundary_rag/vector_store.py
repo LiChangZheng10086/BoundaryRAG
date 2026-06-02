@@ -1,3 +1,11 @@
+"""文档分块的 Milvus Lite 向量存储。
+
+业务元数据保存在 SQLite 中，可检索 embedding 保存在这里。该存储会在
+`.rag_data` 下创建本地 Milvus Lite collection，并在返回候选结果前按
+knowledge_base_id 和 tenant_id 限定查询范围。不同 embedding provider 可能
+产生不同维度，因此 collection 会按向量维度拆分。
+"""
+
 from __future__ import annotations
 
 import json
@@ -8,16 +16,19 @@ from typing import Protocol
 
 from pymilvus import DataType, MilvusClient
 
-from rag_demo.models import Chunk
+from boundary_rag.models import Chunk
 
 
 @dataclass(frozen=True)
 class ChunkSearchMatch:
+    """Milvus 检索命中，以及用于重排的归一化向量得分。"""
     chunk: Chunk
     vector_score: float
 
 
 class ChunkStore(Protocol):
+    """RagService 使用的向量存储协议。"""
+
     def replace_document_chunks(self, *, kb_id: str, document_id: str, chunks: list[Chunk]) -> list[Chunk]:
         raise NotImplementedError
 
@@ -57,6 +68,8 @@ class ChunkStore(Protocol):
 
 
 class MilvusChunkStore:
+    """分块向量和分块文本的本地 Milvus Lite 实现。"""
+
     _VECTOR_FIELD = "embedding"
     _OUTPUT_FIELDS = [
         "id",
@@ -72,6 +85,7 @@ class MilvusChunkStore:
     ]
 
     def __init__(self, *, uri: Path | str, collection_name: str) -> None:
+        """打开或创建本地 Milvus Lite 数据库文件。"""
         self.uri = Path(uri)
         self.collection_name = collection_name
         self.uri.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +93,7 @@ class MilvusChunkStore:
         self._lock = RLock()
 
     def replace_document_chunks(self, *, kb_id: str, document_id: str, chunks: list[Chunk]) -> list[Chunk]:
+        """原子式替换单个文档的全部向量。"""
         with self._lock:
             self.delete_document_chunks(kb_id=kb_id, document_id=document_id)
             if not chunks:
@@ -94,6 +109,7 @@ class MilvusChunkStore:
             return chunks
 
     def upsert_chunks(self, chunks: list[Chunk]) -> list[Chunk]:
+        """插入或更新分块，主要用于旧数据迁移。"""
         with self._lock:
             if not chunks:
                 return []
@@ -108,6 +124,7 @@ class MilvusChunkStore:
             return chunks
 
     def delete_document_chunks(self, *, kb_id: str, document_id: str) -> None:
+        """删除属于单个文档的全部向量行。"""
         for collection_name in self._active_collection_names():
             self._client.delete(
                 collection_name=collection_name,
@@ -119,6 +136,7 @@ class MilvusChunkStore:
             self._flush(collection_name)
 
     def delete_knowledge_base_chunks(self, *, kb_id: str) -> None:
+        """删除属于某个 KB 的全部向量行。"""
         for collection_name in self._active_collection_names():
             self._client.delete(
                 collection_name=collection_name,
@@ -133,6 +151,7 @@ class MilvusChunkStore:
         tenant_id: str | None = None,
         permission_tags: list[str] | None = None,
     ) -> list[Chunk]:
+        """列出分块，用于诊断和文档分块计数。"""
         rows: list[dict] = []
         for collection_name in self._active_collection_names():
             rows.extend(
@@ -158,6 +177,7 @@ class MilvusChunkStore:
         tenant_id: str | None = None,
         permission_tags: list[str] | None = None,
     ) -> dict[str, int]:
+        """为文档列表 UI 统计每个文档的已索引分块数。"""
         chunks = self.list_chunks(kb_id=kb_id, tenant_id=tenant_id, permission_tags=permission_tags)
         counts: dict[str, int] = {}
         for chunk in chunks:
@@ -172,6 +192,7 @@ class MilvusChunkStore:
         query_embedding: list[float],
         limit: int,
     ) -> list[ChunkSearchMatch]:
+        """带 KB 和租户过滤地搜索同维度 collections。"""
         if not query_embedding or limit < 1:
             return []
         collection_names = self._collection_names_for_dimension(len(query_embedding))
@@ -206,6 +227,7 @@ class MilvusChunkStore:
         return matches[:limit]
 
     def _ensure_collection(self, *, collection_name: str, dimension: int) -> None:
+        """必要时为某个向量维度创建 Milvus collection。"""
         if dimension < 1:
             raise RuntimeError("Milvus vector dimension must be greater than 0")
         if self._has_collection(collection_name):
@@ -249,6 +271,7 @@ class MilvusChunkStore:
         return self._client.has_collection(collection_name=collection_name)
 
     def _query_rows(self, collection_name: str, filter_expression: str, *, output_fields: list[str]) -> list[dict]:
+        """加载 collection，并执行带过滤条件的标量查询。"""
         self._ensure_loaded(collection_name)
         return list(
             self._client.query(
@@ -259,6 +282,7 @@ class MilvusChunkStore:
         )
 
     def _chunk_to_row(self, chunk: Chunk) -> dict:
+        """把 Pydantic Chunk 转换为 Milvus 标量字段和向量字段。"""
         return {
             "id": chunk.id,
             "knowledge_base_id": chunk.knowledge_base_id,
@@ -277,6 +301,7 @@ class MilvusChunkStore:
         }
 
     def _row_to_chunk(self, row: dict) -> Chunk:
+        """把 Milvus 行转换回共享的 Chunk 模型。"""
         return Chunk(
             id=row["id"],
             knowledge_base_id=row.get("knowledge_base_id") or "",
@@ -297,6 +322,7 @@ class MilvusChunkStore:
         kb_id: str,
         tenant_id: str | None = None,
     ) -> str:
+        """构建 list/search 操作使用的 Milvus 标量过滤表达式。"""
         fields = self._collection_field_names(collection_name) if collection_name else set()
         expression_parts: list[str] = []
         if not fields or "knowledge_base_id" in fields:
@@ -330,6 +356,7 @@ class MilvusChunkStore:
             return default
 
     def _bounded_text(self, value: str, max_length: int, label: str) -> str:
+        """如果文本超过 Milvus VARCHAR schema 限制，则在插入前失败。"""
         if len(value) > max_length:
             raise ValueError(f"{label} is too large for Milvus storage; limit is {max_length} characters")
         return value
@@ -340,6 +367,7 @@ class MilvusChunkStore:
         return set(required_tags).issubset(user_tags)
 
     def _chunks_by_dimension(self, chunks: list[Chunk]) -> dict[int, list[Chunk]]:
+        """按维度分组分块，因为每个 Milvus collection 只能有一种向量维度。"""
         grouped: dict[int, list[Chunk]] = {}
         for chunk in chunks:
             dimension = len(chunk.embedding)
@@ -352,6 +380,7 @@ class MilvusChunkStore:
         return f"{self.collection_name}_d{dimension}"
 
     def _active_collection_names(self) -> list[str]:
+        """返回本存储管理的旧 collection 和维度后缀 collection。"""
         prefix = f"{self.collection_name}_d"
         names = [
             name
@@ -361,6 +390,7 @@ class MilvusChunkStore:
         return sorted(names)
 
     def _collection_names_for_dimension(self, dimension: int) -> list[str]:
+        """查找与查询 embedding 维度兼容的 collections。"""
         names: list[str] = []
         dimension_collection = self._collection_name_for_dimension(dimension)
         if self._has_collection(dimension_collection):
@@ -379,4 +409,5 @@ class MilvusChunkStore:
 
 
 def create_chunk_store(*, uri: Path | str, collection_name: str) -> MilvusChunkStore:
+    """应用和服务装配时使用的工厂函数。"""
     return MilvusChunkStore(uri=uri, collection_name=collection_name)

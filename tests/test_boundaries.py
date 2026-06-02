@@ -5,13 +5,13 @@ import time
 import pytest
 from pymilvus import DataType, MilvusClient
 
-from rag_demo.chunking import chunk_document
-from rag_demo.embeddings import LocalHashEmbeddingProvider
-from rag_demo.llm import LocalBoundaryLLMProvider
-from rag_demo.models import AccessContext, ArtifactRecord, Chunk, Document, DocumentIn, KnowledgeBase, KnowledgeBaseCreate
-from rag_demo.service import RagService
-from rag_demo.store import JsonStore, SqliteStore
-from rag_demo.vector_store import create_chunk_store
+from boundary_rag.chunking import chunk_document
+from boundary_rag.embeddings import LocalHashEmbeddingProvider
+from boundary_rag.llm import LocalBoundaryLLMProvider
+from boundary_rag.models import AccessContext, ArtifactRecord, Chunk, Document, DocumentIn, KnowledgeBase, KnowledgeBaseCreate
+from boundary_rag.service import RagService
+from boundary_rag.store import JsonStore, SqliteStore
+from boundary_rag.vector_store import create_chunk_store
 
 
 @pytest.fixture
@@ -553,7 +553,7 @@ async def test_upload_security_rejects_invalid_office_archive(service: RagServic
 
 @pytest.mark.asyncio
 async def test_upload_parse_timeout_is_reported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import rag_demo.service as service_module
+    import boundary_rag.service as service_module
 
     original_parse = service_module.parse_uploaded_document
 

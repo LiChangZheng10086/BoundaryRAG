@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from rag_demo.config import Settings
-from rag_demo.embeddings import DashScopeEmbeddingProvider
+from boundary_rag.config import Settings
+from boundary_rag.embeddings import DashScopeEmbeddingProvider
 
 
 def test_extract_dashscope_embedding_response() -> None:

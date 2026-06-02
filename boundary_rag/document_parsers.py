@@ -1,3 +1,11 @@
+"""上传文件解析和轻量安全检查。
+
+上传文件会先转换成纯文本，然后再进入切分流程。Markdown 按文本读取；
+Office 文件会先按 zip 归档检查，用于防护路径穿越、加密文件、zip bomb
+以及扩展名伪装。解析器刻意只返回规范化文本和 metadata，不把上传二进制
+直接存入数据库。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,6 +16,7 @@ from zipfile import BadZipFile, ZipFile
 
 @dataclass(frozen=True)
 class ParsedDocument:
+    """上传解析器返回的规范化文档文本。"""
     title: str
     content: str
     metadata: dict[str, str]
@@ -15,6 +24,7 @@ class ParsedDocument:
 
 @dataclass(frozen=True)
 class UploadSecurityPolicy:
+    """解析前扫描 Office zip 容器时使用的安全限制。"""
     max_archive_members: int = 512
     max_archive_uncompressed_bytes: int = 100 * 1024 * 1024
     max_archive_compression_ratio: float = 100.0
@@ -27,6 +37,7 @@ def parse_uploaded_document(
     data: bytes,
     security_policy: UploadSecurityPolicy | None = None,
 ) -> ParsedDocument:
+    """把受支持的上传文件解析成文本和来源 metadata。"""
     if not data:
         raise ValueError("uploaded file is empty")
 
@@ -65,6 +76,7 @@ def parse_uploaded_document(
 
 
 def _validate_upload_security(*, extension: str, data: bytes, policy: UploadSecurityPolicy) -> None:
+    """在提取内容前，根据扩展名分发对应的安全检查。"""
     if extension in {".md", ".markdown"}:
         if b"\x00" in data:
             raise ValueError("uploaded markdown appears to be binary data")
@@ -82,6 +94,7 @@ def _validate_upload_security(*, extension: str, data: bytes, policy: UploadSecu
 
 
 def _validate_office_zip(*, data: bytes, expected_member: str, policy: UploadSecurityPolicy) -> None:
+    """在不落盘解压的情况下校验 Office 归档文件。"""
     try:
         with ZipFile(BytesIO(data)) as archive:
             infos = archive.infolist()
@@ -117,6 +130,7 @@ def _validate_office_zip(*, data: bytes, expected_member: str, policy: UploadSec
 
 
 def _decode_text(data: bytes) -> str:
+    """使用常见中文/UTF 编码解码 Markdown 上传内容。"""
     for encoding in ("utf-8-sig", "utf-8", "gb18030"):
         try:
             return data.decode(encoding)
@@ -126,6 +140,7 @@ def _decode_text(data: bytes) -> str:
 
 
 def _parse_docx(data: bytes) -> str:
+    """提取 Word 段落，并把表格扁平化为管道分隔行。"""
     from docx import Document as DocxDocument
 
     document = DocxDocument(BytesIO(data))
@@ -146,6 +161,7 @@ def _parse_docx(data: bytes) -> str:
 
 
 def _parse_pptx(data: bytes) -> str:
+    """提取 PPT 页面文本和表格单元格，并转换成类 Markdown 章节。"""
     from pptx import Presentation
 
     presentation = Presentation(BytesIO(data))

@@ -1,6 +1,6 @@
 import { computed, reactive, watch } from "vue";
 
-const SESSION_PROFILE_KEY = "rag_demo_session_profile";
+const SESSION_PROFILE_KEY = "boundary_rag_session_profile";
 
 const DEFAULT_IDENTITY = {
   userId: "lcz10086",
@@ -1161,7 +1161,7 @@ export function useWorkspace() {
     const normalized = normalizeIdentity(identity);
     const tags = [...normalized.permissionTags].sort().join(",");
     return [
-      "rag_demo_state",
+      "boundary_rag_state",
       encodeURIComponent(normalized.tenantId),
       encodeURIComponent(normalized.userId),
       encodeURIComponent(tags || "public"),

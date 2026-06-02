@@ -1,17 +1,32 @@
+"""问答和 skills 共用的检索管线。
+
+Retriever 是用户意图和已索引知识之间的桥梁：
+1. 对用户问题做向量化；
+2. 只在当前知识库和租户范围内查询 Milvus Lite；
+3. 按文档权限标签过滤；
+4. 合并向量距离和词面重叠得分做轻量重排；
+5. 最后断言没有 chunk 泄露出当前知识库边界。
+"""
+
 from __future__ import annotations
 
-from rag_demo.embeddings import EmbeddingProvider
-from rag_demo.models import AccessContext, Source
-from rag_demo.vector_store import ChunkStore
+from boundary_rag.embeddings import EmbeddingProvider
+from boundary_rag.models import AccessContext, Source
+from boundary_rag.vector_store import ChunkStore
 
 
 class Retriever:
+    """每次 LLM 调用前使用的边界感知检索器。"""
+
     def __init__(self, chunk_store: ChunkStore, embeddings: EmbeddingProvider) -> None:
         self.chunk_store = chunk_store
         self.embeddings = embeddings
 
     async def retrieve(self, *, kb_id: str, query: str, top_k: int, access: AccessContext) -> list[Source]:
+        """返回当前用户可访问的最佳 chunk。"""
         query_embedding = (await self.embeddings.embed([query]))[0]
+        # 先从 Milvus 拉取更宽的候选集，再在本地过滤和重排。
+        # 这样权限检查更显式，也能让词面匹配补救一些高信号的精确术语。
         matches = self.chunk_store.search_chunks(
             kb_id=kb_id,
             tenant_id=access.tenant_id,
@@ -51,6 +66,7 @@ class Retriever:
         return self._enforce_boundary(kb_id=kb_id, sources=sources)
 
     def _enforce_boundary(self, *, kb_id: str, sources: list[Source]) -> list[Source]:
+        """如果向量存储返回了其他 KB 的 chunk，则直接失败并关闭边界。"""
         leaked = [source for source in sources if source.knowledge_base_id != kb_id]
         if leaked:
             leaked_ids = ", ".join(source.chunk_id for source in leaked)
@@ -64,6 +80,7 @@ class Retriever:
         vector_score: float,
         text: str,
     ) -> dict[str, float]:
+        """融合语义/向量得分和精确词面重叠得分。"""
         lexical_score = self._lexical_overlap(query, text)
         return {
             "score": vector_score + lexical_score,
@@ -72,6 +89,7 @@ class Retriever:
         }
 
     def _lexical_overlap(self, query: str, text: str) -> float:
+        """计算简单的精确 token 重叠，用于确定性重排。"""
         query_tokens = self._tokens(query)
         text_tokens = self._tokens(text)
         if not query_tokens or not text_tokens:
@@ -79,6 +97,7 @@ class Retriever:
         return len(query_tokens & text_tokens) / len(query_tokens)
 
     def _tokens(self, text: str) -> set[str]:
+        """生成兼容中英文的混合词面 token。"""
         compact = "".join(ch.lower() for ch in text if not ch.isspace())
         char_grams = {compact[index : index + 2] for index in range(max(0, len(compact) - 1))}
         chars = set(compact)
@@ -86,6 +105,7 @@ class Retriever:
         return chars | char_grams | words
 
     def _is_allowed(self, required_tags: list[str], user_tags: set[str]) -> bool:
+        """判断调用者是否拥有文档要求的全部权限标签。"""
         if not required_tags:
             return True
         return set(required_tags).issubset(user_tags)

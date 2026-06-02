@@ -1,3 +1,10 @@
+"""索引和检索使用的 Embedding provider。
+
+生产路径可以调用 DashScope 多模态 embedding API。没有配置外部 API key 时，
+本地 hash embedding provider 可用于演示、离线测试和开发。两者暴露相同的
+异步接口，因此 RAG 管线的其他部分不需要关心向量来自哪里。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -6,16 +13,24 @@ import math
 from abc import ABC, abstractmethod
 from typing import Any
 
-from rag_demo.config import Settings
+from boundary_rag.config import Settings
 
 
 class EmbeddingProvider(ABC):
+    """把文本 chunk 或用户问题转换成向量的异步接口。"""
+
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
         raise NotImplementedError
 
 
 class LocalHashEmbeddingProvider(EmbeddingProvider):
+    """本地开发使用的确定性兜底 embedding provider。
+
+    它不是语义模型；它生成归一化后的 hash token 向量，让测试可以在不发起
+    网络调用的情况下覆盖完整 Milvus/RAG 管线。
+    """
+
     def __init__(self, dimension: int = 384) -> None:
         self.dimension = dimension
 
@@ -23,6 +38,7 @@ class LocalHashEmbeddingProvider(EmbeddingProvider):
         return [self._embed_one(text) for text in texts]
 
     def _embed_one(self, text: str) -> list[float]:
+        """把单词、字符和 bigram 投影到固定长度向量中。"""
         vector = [0.0] * self.dimension
         tokens = self._tokenize(text)
         for token in tokens:
@@ -37,6 +53,7 @@ class LocalHashEmbeddingProvider(EmbeddingProvider):
         return [value / norm for value in vector]
 
     def _tokenize(self, text: str) -> list[str]:
+        """混合词级和字符级特征，以同时兼容中文和英文。"""
         compact = "".join(ch.lower() for ch in text if not ch.isspace())
         words = [word.lower() for word in text.replace("\n", " ").split() if word.strip()]
         chars = list(compact)
@@ -45,6 +62,8 @@ class LocalHashEmbeddingProvider(EmbeddingProvider):
 
 
 class DashScopeEmbeddingProvider(EmbeddingProvider):
+    """支持可配置批量大小的 DashScope embedding 适配器。"""
+
     def __init__(self, settings: Settings) -> None:
         if not settings.dashscope_api_key:
             raise ValueError("DASHSCOPE_API_KEY is required when EMBEDDING_PROVIDER=dashscope")
@@ -55,11 +74,13 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
         self.batch_size = settings.dashscope_embedding_batch_size
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        """把同步 DashScope SDK 调用放到工作线程中执行。"""
         if not texts:
             return []
         return await asyncio.to_thread(self._embed_sync, texts)
 
     def _embed_sync(self, texts: list[str]) -> list[list[float]]:
+        """按批次请求，避免超过 provider 侧输入数量限制。"""
         embeddings: list[list[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = texts[start : start + self.batch_size]
@@ -67,6 +88,7 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
         return embeddings
 
     def _embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
+        """对一个安全大小的批次调用 DashScope MultiModalEmbedding。"""
         import dashscope
 
         dashscope.api_key = self.api_key
@@ -80,6 +102,7 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
         return self._extract_embeddings(response)
 
     def _extract_embeddings(self, response: Any) -> list[list[float]]:
+        """把支持的 DashScope 响应格式统一转换为向量列表。"""
         status_code = self._get(response, "status_code")
         if status_code and status_code != 200:
             code = self._get(response, "code") or "unknown_error"
@@ -105,6 +128,7 @@ class DashScopeEmbeddingProvider(EmbeddingProvider):
 
 
 def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
+    """根据环境配置选择 embedding provider。"""
     if settings.embedding_provider == "dashscope":
         return DashScopeEmbeddingProvider(settings)
     return LocalHashEmbeddingProvider()

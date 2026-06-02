@@ -4,14 +4,14 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from rag_demo.app import app, get_redis_cache, get_service, get_user_store
-from rag_demo.auth import sign_access_token
-from rag_demo.config import Settings
-from rag_demo.embeddings import LocalHashEmbeddingProvider
-from rag_demo.llm import LocalBoundaryLLMProvider
-from rag_demo.models import AccessContext
-from rag_demo.service import RagService
-from rag_demo.store import JsonStore, SqliteStore
+from boundary_rag.app import app, get_redis_cache, get_service, get_user_store
+from boundary_rag.auth import sign_access_token
+from boundary_rag.config import Settings
+from boundary_rag.embeddings import LocalHashEmbeddingProvider
+from boundary_rag.llm import LocalBoundaryLLMProvider
+from boundary_rag.models import AccessContext
+from boundary_rag.service import RagService
+from boundary_rag.store import JsonStore, SqliteStore
 
 
 def make_service(tmp_path: Path) -> RagService:

@@ -1,3 +1,9 @@
+"""后端基于环境变量的配置。
+
+Settings 是不可变 dataclass，每个 FastAPI 依赖都可以从 `.env` 和环境变量
+构建一份清晰的配置快照。密钥只从这里读取，绝不硬编码进源码。
+"""
+
 from __future__ import annotations
 
 import os
@@ -12,6 +18,8 @@ load_dotenv()
 
 @dataclass(frozen=True)
 class Settings:
+    """按存储、认证、Embedding 和 LLM provider 分组的运行配置。"""
+
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_DATA_DIR", ".rag_data")))
     artifact_dir: Path = field(default_factory=lambda: Path(os.getenv("RAG_ARTIFACT_DIR", ".rag_data/artifacts")))
     sqlite_path: Path = field(default_factory=lambda: Path(os.getenv("RAG_SQLITE_PATH", ".rag_data/boundaryrag.sqlite3")))
@@ -58,6 +66,7 @@ class Settings:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """解析 `.env` 文件里常见的布尔真值字符串。"""
     value = os.getenv(name)
     if value is None:
         return default
@@ -65,4 +74,5 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def get_settings() -> Settings:
+    """为依赖工厂和测试返回一份新的配置快照。"""
     return Settings()

@@ -1,5 +1,5 @@
 [project]
-name = "rag-demo"
+name = "boundary-rag"
 version = "0.1.0"
 description = "A Python RAG MVP with strict knowledge-base and skill boundaries."
 requires-python = ">=3.11"

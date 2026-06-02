@@ -278,7 +278,7 @@ pip install -e ".[dev]"
 
 ### 2. 构建前端
 
-前端源码在 `frontend/`，构建产物会写入 `rag_demo/web/` 并由 FastAPI 托管。仓库里保留了最新构建产物；如果你修改过前端，或想从源码重新构建，请执行：
+前端源码在 `frontend/`，构建产物会写入 `boundary_rag/web/` 并由 FastAPI 托管。仓库里保留了最新构建产物；如果你修改过前端，或想从源码重新构建，请执行：
 
 ```bash
 npm install
@@ -304,7 +304,7 @@ docker run --name boundaryrag-redis -p 6379:6379 -d redis:7
 然后启动 FastAPI：
 
 ```bash
-uvicorn rag_demo.app:app --reload
+uvicorn boundary_rag.app:app --reload
 ```
 
 ### 5. 打开页面
@@ -313,7 +313,7 @@ uvicorn rag_demo.app:app --reload
 http://127.0.0.1:8000/
 ```
 
-前端由 FastAPI 直接托管 `rag_demo/web/`，建议使用 `http://127.0.0.1:8000/`，不要直接使用 `file://` 测试接口能力。前端开发时可使用 `npm run dev` 启动 Vite，开发服务器已把后端 API 代理到 `http://127.0.0.1:8000`。
+前端由 FastAPI 直接托管 `boundary_rag/web/`，建议使用 `http://127.0.0.1:8000/`，不要直接使用 `file://` 测试接口能力。前端开发时可使用 `npm run dev` 启动 Vite，开发服务器已把后端 API 代理到 `http://127.0.0.1:8000`。
 
 ## 环境变量
 
@@ -491,7 +491,7 @@ X-Conversation-Id: conv_xxx
 ## 测试
 
 ```bash
-python -m compileall -q rag_demo
+python -m compileall -q boundary_rag
 npm run build
 pytest -q
 ```

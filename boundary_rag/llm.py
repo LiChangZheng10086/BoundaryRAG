@@ -1,3 +1,10 @@
+"""用于答案生成和流式输出的 LLM provider。
+
+检索发生在本层之前。LLM 只接收当前知识库上下文和最近对话历史，然后生成
+最终答案。Prompt 会明确禁止使用其他知识库或未给出的背景知识，从而保持
+产品边界清晰可见。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,11 +14,13 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from rag_demo.config import Settings
-from rag_demo.models import ConversationMessage, KnowledgeBase, Source
+from boundary_rag.config import Settings
+from boundary_rag.models import ConversationMessage, KnowledgeBase, Source
 
 
 class LLMProvider(ABC):
+    """本地演示生成和外部 LLM 共用的异步接口。"""
+
     @abstractmethod
     async def answer(
         self,
@@ -31,6 +40,7 @@ class LLMProvider(ABC):
         sources: list[Source],
         history: list[ConversationMessage] | None = None,
     ) -> AsyncIterator[str]:
+        """非流式 provider 的默认流式实现。"""
         answer = await self.answer(kb=kb, instruction=instruction, sources=sources, history=history)
         for chunk in _text_chunks(answer):
             yield chunk
@@ -38,6 +48,8 @@ class LLMProvider(ABC):
 
 
 class LocalBoundaryLLMProvider(LLMProvider):
+    """未配置外部 LLM 时使用的确定性本地 provider。"""
+
     async def answer(
         self,
         *,
@@ -46,6 +58,7 @@ class LocalBoundaryLLMProvider(LLMProvider):
         sources: list[Source],
         history: list[ConversationMessage] | None = None,
     ) -> str:
+        """基于检索片段生成具备边界意识的演示答案。"""
         if not sources:
             return f"我在 {kb.name} 中没有找到足够依据，不能使用其他知识库的信息回答。"
 
@@ -64,6 +77,8 @@ class LocalBoundaryLLMProvider(LLMProvider):
 
 
 class DeepSeekLLMProvider(LLMProvider):
+    """支持非流式和流式 API 的 DeepSeek chat-completions 适配器。"""
+
     def __init__(self, settings: Settings) -> None:
         if not settings.deepseek_api_key:
             raise ValueError("DEEPSEEK_API_KEY is required when LLM_PROVIDER=deepseek")
@@ -79,6 +94,7 @@ class DeepSeekLLMProvider(LLMProvider):
         sources: list[Source],
         history: list[ConversationMessage] | None = None,
     ) -> list[dict[str, str]]:
+        """根据 KB 元数据、历史和来源构建带边界约束的 prompt。"""
         context = "\n\n".join(
             f"[{index}] title={source.title} chunk_id={source.chunk_id}\n{source.text}"
             for index, source in enumerate(sources, start=1)
@@ -104,6 +120,7 @@ class DeepSeekLLMProvider(LLMProvider):
         sources: list[Source],
         history: list[ConversationMessage] | None = None,
     ) -> str:
+        """调用一次 DeepSeek，并返回完整答案文本。"""
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
@@ -131,6 +148,7 @@ class DeepSeekLLMProvider(LLMProvider):
         sources: list[Source],
         history: list[ConversationMessage] | None = None,
     ) -> AsyncIterator[str]:
+        """把 DeepSeek SSE delta 作为纯文本 chunk 逐段返回给前端。"""
         try:
             timeout = httpx.Timeout(120.0, connect=10.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -163,10 +181,12 @@ class DeepSeekLLMProvider(LLMProvider):
 
 
 def create_llm_provider(settings: Settings) -> LLMProvider:
+    """根据环境配置选择 LLM provider。"""
     if settings.llm_provider == "deepseek":
         return DeepSeekLLMProvider(settings)
     return LocalBoundaryLLMProvider()
 
 
 def _text_chunks(text: str, size: int = 16) -> list[str]:
+    """把本地答案切成小片段，用于模拟流式输出体验。"""
     return [text[index : index + size] for index in range(0, len(text), size)] or [""]

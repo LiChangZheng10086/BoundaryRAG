@@ -1,3 +1,11 @@
+"""BoundaryRAG 的业务编排层。
+
+`RagService` 是后端主要的用例边界。路由处理器应保持轻量，并把领域工作
+交给这个类：知识库归属、文档索引、检索、对话持久化、skill 执行、产物访问
+和操作历史。存储与模型 provider 通过依赖注入传入，因此测试可以替换它们，
+而不需要修改 API 代码。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,10 +13,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from rag_demo.chunking import chunk_document
-from rag_demo.embeddings import EmbeddingProvider
-from rag_demo.llm import LLMProvider
-from rag_demo.models import (
+from boundary_rag.chunking import chunk_document
+from boundary_rag.embeddings import EmbeddingProvider
+from boundary_rag.llm import LLMProvider
+from boundary_rag.models import (
     AccessContext,
     ArtifactRecord,
     ArtifactPreview,
@@ -26,12 +34,12 @@ from rag_demo.models import (
     ReindexResponse,
     SkillResponse,
 )
-from rag_demo.retriever import Retriever
-from rag_demo.skills import SkillRegistry
-from rag_demo.store import JsonStore, SqliteStore
-from rag_demo.vector_store import ChunkStore, create_chunk_store
+from boundary_rag.retriever import Retriever
+from boundary_rag.skills import SkillRegistry
+from boundary_rag.store import JsonStore, SqliteStore
+from boundary_rag.vector_store import ChunkStore, create_chunk_store
 
-from rag_demo.document_parsers import UploadSecurityPolicy, parse_uploaded_document
+from boundary_rag.document_parsers import UploadSecurityPolicy, parse_uploaded_document
 
 
 DEFAULT_MAX_DOCUMENT_CHARS = 200_000
@@ -40,6 +48,8 @@ CONVERSATION_CONTEXT_MESSAGES = 12
 
 @dataclass(frozen=True)
 class ConversationStream:
+    """流式答案包装器，同时暴露 conversation id。"""
+
     conversation_id: str
     chunks: AsyncIterator[str]
 
@@ -48,6 +58,8 @@ class ConversationStream:
 
 
 class RagService:
+    """协调 metadata 存储、向量存储、Embedding、LLM 和 skills。"""
+
     def __init__(
         self,
         *,
@@ -60,6 +72,7 @@ class RagService:
         upload_parse_timeout_seconds: float = 10.0,
         upload_security_policy: UploadSecurityPolicy | None = None,
     ) -> None:
+        """装配服务依赖，并校验运行限制。"""
         if max_document_chars < 1:
             raise ValueError("max_document_chars must be greater than 0")
         if upload_parse_timeout_seconds <= 0:
@@ -79,6 +92,7 @@ class RagService:
         self.skills = SkillRegistry(artifact_dir)
 
     def create_knowledge_base(self, data: KnowledgeBaseCreate, access: AccessContext | None = None) -> KnowledgeBase:
+        """在当前用户租户内创建归属于该用户的知识库。"""
         access = access or AccessContext()
         if data.tenant_id != access.tenant_id:
             raise PermissionError(f"cannot create knowledge base in tenant '{data.tenant_id}'")
@@ -87,6 +101,11 @@ class RagService:
         return self.store.create_knowledge_base(kb, user_id=access.user_id)
 
     def list_knowledge_bases(self, access: AccessContext | None = None) -> list[KnowledgeBase]:
+        """只列出当前用户可见的知识库。
+
+        这里有意不让 admin 绕过归属边界：本产品先做用户级隔离，
+        再在这个边界内使用权限标签。
+        """
         items = self.store.list_knowledge_bases()
         if not access:
             return items
@@ -103,6 +122,7 @@ class RagService:
         ]
 
     def delete_knowledge_base(self, *, kb_id: str, access: AccessContext | None = None) -> None:
+        """删除 KB metadata、Milvus chunks、对话和生成产物。"""
         access = access or AccessContext()
         kb = self._require_kb(kb_id, access=access)
         artifacts = self.store.list_artifacts(kb_id=kb.id, permission_tags=None)
@@ -122,6 +142,11 @@ class RagService:
         data: DocumentIn,
         access: AccessContext | None = None,
     ) -> Document:
+        """持久化文档、构建 chunk、生成向量，并写入 Milvus。
+
+        文档会先以 `indexing` 状态落库，这样失败时前端可以长期展示失败状态。
+        如果索引失败，会清理旧向量，并把错误原因写回 SQLite。
+        """
         access = access or data.access
         data = self._validate_document_input(data)
         self._require_kb(kb_id, access=access)
@@ -163,6 +188,7 @@ class RagService:
         permission_tags: list[str],
         access: AccessContext | None = None,
     ) -> Document:
+        """带超时和安全检查地解析上传文件，然后进入索引流程。"""
         access = access or AccessContext()
         try:
             parsed = await asyncio.wait_for(
@@ -189,6 +215,7 @@ class RagService:
         )
 
     def list_documents(self, *, kb_id: str, access: AccessContext | None = None) -> list[DocumentSummary]:
+        """返回文档行，并附带来自 Milvus 的实时 chunk 数。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         chunk_counts = self.chunk_store.count_chunks_by_document(
@@ -203,6 +230,7 @@ class RagService:
         )
 
     def list_conversations(self, *, kb_id: str, access: AccessContext | None = None) -> list[Conversation]:
+        """列出当前 KB 中归属于当前用户的对话线程。"""
         access = access or AccessContext()
         kb = self._require_kb(kb_id, access=access)
         return self.store.list_conversations(
@@ -218,12 +246,14 @@ class RagService:
         conversation_id: str,
         access: AccessContext | None = None,
     ) -> list[ConversationMessage]:
+        """校验 KB 和用户归属后，返回已持久化的消息。"""
         access = access or AccessContext()
         kb = self._require_kb(kb_id, access=access)
         conversation = self._get_conversation_for_access(kb=kb, access=access, conversation_id=conversation_id)
         return self.store.list_conversation_messages(conversation_id=conversation.id, limit=100)
 
     def get_document(self, *, kb_id: str, document_id: str, access: AccessContext | None = None) -> Document:
+        """完成 KB 和权限检查后加载单个文档。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         document = self.store.get_document(kb_id=kb_id, document_id=document_id)
@@ -233,6 +263,7 @@ class RagService:
         return document
 
     def delete_document(self, *, kb_id: str, document_id: str, access: AccessContext | None = None) -> None:
+        """同时删除文档 metadata 和它已索引的向量。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         document = self.store.get_document(kb_id=kb_id, document_id=document_id)
@@ -251,6 +282,7 @@ class RagService:
         document_id: str,
         access: AccessContext | None = None,
     ) -> ReindexResponse:
+        """重建文档 chunk 和向量，并保留失败状态。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         document = self.store.get_document(kb_id=kb_id, document_id=document_id)
@@ -284,6 +316,7 @@ class RagService:
             raise
 
     async def _build_chunks(self, document: Document) -> list[Chunk]:
+        """对单个文档执行文本切分和 embedding。"""
         pieces = chunk_document(document.content)
         if not pieces:
             raise ValueError("document content is empty after normalization")
@@ -311,6 +344,7 @@ class RagService:
         ]
 
     def _validate_document_input(self, data: DocumentIn) -> DocumentIn:
+        """索引前规范化标题，并校验文档大小边界。"""
         title = data.title.strip()
         if not title:
             raise ValueError("document title is empty")
@@ -324,6 +358,7 @@ class RagService:
         return data.model_copy(update={"title": title})
 
     def _validate_embeddings(self, embeddings: list[list[float]]) -> None:
+        """在写入 Milvus 前尽早发现 provider 返回异常。"""
         if not embeddings:
             raise RuntimeError("embedding provider returned no vectors")
         dimension = len(embeddings[0])
@@ -333,6 +368,7 @@ class RagService:
             raise RuntimeError("embedding provider returned inconsistent vector dimensions")
 
     def _error_message(self, exc: Exception) -> str:
+        """让持久化失败信息既有用又不会过长。"""
         message = str(exc).strip()
         return message[:500] if message else exc.__class__.__name__
 
@@ -344,6 +380,7 @@ class RagService:
         conversation_id: str | None,
         question: str,
     ) -> Conversation:
+        """复用已有对话，或创建新的用户级隔离对话线程。"""
         if conversation_id:
             return self._get_conversation_for_access(kb=kb, access=access, conversation_id=conversation_id)
 
@@ -363,6 +400,7 @@ class RagService:
         access: AccessContext,
         conversation_id: str,
     ) -> Conversation:
+        """确保对话不会跨 KB、租户或用户边界。"""
         conversation = self.store.get_conversation(conversation_id)
         if not conversation:
             raise KeyError(f"conversation '{conversation_id}' does not exist")
@@ -373,6 +411,7 @@ class RagService:
         return conversation
 
     def _record_conversation_turn(self, *, conversation: Conversation, question: str, answer: str) -> None:
+        """持久化一轮完整问答中的用户消息和助手消息。"""
         self.store.add_conversation_message(
             ConversationMessage(
                 conversation_id=conversation.id,
@@ -390,6 +429,7 @@ class RagService:
         self.store.touch_conversation(conversation_id=conversation.id)
 
     def _conversation_title(self, question: str) -> str:
+        """根据用户首个问题生成紧凑的默认对话标题。"""
         title = " ".join(question.strip().split())
         return title[:40] or "新对话"
 
@@ -402,6 +442,7 @@ class RagService:
         conversation_id: str | None = None,
         access: AccessContext | None = None,
     ) -> QueryResponse:
+        """通过检索、LLM 生成和历史保存回答一个问题。"""
         access = access or AccessContext()
         if not question.strip():
             raise ValueError("question is empty")
@@ -431,6 +472,7 @@ class RagService:
         conversation_id: str | None = None,
         access: AccessContext | None = None,
     ) -> ConversationStream:
+        """流式输出答案，并在流成功结束后持久化完整问答轮次。"""
         access = access or AccessContext()
         if not question.strip():
             raise ValueError("question is empty")
@@ -450,6 +492,7 @@ class RagService:
         answer_chunks: list[str] = []
 
         async def stream() -> AsyncIterator[str]:
+            """收集流式 chunk，确保保存到历史中的答案与前端看到的一致。"""
             try:
                 async for chunk in self.llm.stream_answer(
                     kb=kb,
@@ -479,6 +522,7 @@ class RagService:
         top_k: int,
         access: AccessContext | None = None,
     ) -> SkillResponse:
+        """使用检索上下文执行当前 KB 允许的 skill。"""
         access = access or AccessContext()
         if not instruction.strip():
             raise ValueError("instruction is empty")
@@ -487,6 +531,8 @@ class RagService:
         sources = await self.retriever.retrieve(kb_id=kb.id, query=instruction, top_k=top_k, access=access)
         response = await skill.run(kb=kb, instruction=instruction, sources=sources, llm=self.llm)
         if response.artifact:
+            # 产物可见性继承 KB 标签、用户标签和来源标签，确保预览/下载权限
+            # 不会比生成时使用的依据更宽。
             permission_tags = sorted(
                 set(kb.permission_tags)
                 | set(access.permission_tags)
@@ -513,6 +559,7 @@ class RagService:
         kb_id: str,
         access: AccessContext | None = None,
     ) -> list[ArtifactSummary]:
+        """列出当前用户可见的生成文件。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         records = self.store.list_artifacts(kb_id=kb_id, permission_tags=access.permission_tags)
@@ -543,6 +590,7 @@ class RagService:
         kb_id: str | None = None,
         limit: int = 100,
     ) -> list[OperationEvent]:
+        """返回当前用户最近的操作历史。"""
         access = access or AccessContext()
         if kb_id:
             self._require_kb(kb_id, access=access)
@@ -563,6 +611,7 @@ class RagService:
         artifact_id: str,
         access: AccessContext | None = None,
     ) -> tuple[ArtifactRecord, Path]:
+        """解析产物 metadata 以及对应文件路径。"""
         artifact = self._require_artifact(kb_id=kb_id, artifact_id=artifact_id, access=access)
         path = self.artifact_dir / artifact.filename
         if not path.exists():
@@ -576,6 +625,7 @@ class RagService:
         artifact_id: str,
         access: AccessContext | None = None,
     ) -> ArtifactPreview:
+        """从产物中提取文本，供生成历史预览 UI 使用。"""
         artifact, path = self.get_artifact_file(kb_id=kb_id, artifact_id=artifact_id, access=access)
         data = path.read_bytes()
         if path.suffix.lower() in {".md", ".markdown"}:
@@ -604,6 +654,7 @@ class RagService:
         artifact_id: str,
         access: AccessContext | None = None,
     ) -> None:
+        """删除生成产物 metadata 和文件内容。"""
         artifact = self._require_artifact(kb_id=kb_id, artifact_id=artifact_id, access=access)
         path = self.artifact_dir / artifact.filename
         deleted = self.store.delete_artifact(kb_id=kb_id, artifact_id=artifact.id)
@@ -619,6 +670,7 @@ class RagService:
         artifact_id: str,
         access: AccessContext | None = None,
     ) -> ArtifactRecord:
+        """加载产物，并强制校验租户、归属用户和标签边界。"""
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         artifact = self.store.get_artifact(kb_id=kb_id, artifact_id=artifact_id)
@@ -632,6 +684,7 @@ class RagService:
         return artifact
 
     def _require_kb(self, kb_id: str, access: AccessContext | None = None) -> KnowledgeBase:
+        """加载 KB，并强制校验租户、归属用户和权限标签。"""
         kb = self.store.get_knowledge_base(kb_id)
         if not kb:
             raise KeyError(f"knowledge base '{kb_id}' does not exist")
@@ -649,13 +702,16 @@ class RagService:
         return kb
 
     def _require_tags(self, required_tags: list[str], *, access: AccessContext, subject: str) -> None:
+        """除管理员外，要求当前用户具备全部必需标签。"""
         if self._is_admin(access):
             return
         if required_tags and not set(required_tags).issubset(set(access.permission_tags)):
             raise PermissionError(f"missing permission tags for {subject}")
 
     def _can_access_kb(self, kb: KnowledgeBase, *, access: AccessContext) -> bool:
+        """当前知识库按 owner_user_id 做用户级隔离。"""
         return kb.owner_user_id == access.user_id
 
     def _is_admin(self, access: AccessContext) -> bool:
+        """集中角色判断，方便未来扩展角色体系。"""
         return access.role == "admin"

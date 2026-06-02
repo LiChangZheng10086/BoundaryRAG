@@ -6,7 +6,7 @@ export default defineConfig({
   root: "frontend",
   base: "/static/",
   build: {
-    outDir: "../rag_demo/web",
+    outDir: "../boundary_rag/web",
     emptyOutDir: true,
     cssCodeSplit: false,
   },

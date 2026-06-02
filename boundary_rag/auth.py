@@ -1,3 +1,14 @@
+"""HTTP 层和测试共用的认证基础能力。
+
+BoundaryRAG 支持两类 token：
+- `brg_...` 不透明会话 token，由用户名/密码登录流程创建并存入 Redis。
+- HS256 JWT Bearer token，用于 API 客户端，并兼容集成测试。
+  JWT 撤销逻辑由本模块外部的 RedisCache 处理。
+
+这里的函数刻意不依赖具体 Web 框架，方便在 FastAPI 路由、服务测试、
+以及未来的后台任务中复用。
+"""
+
 from __future__ import annotations
 
 import base64
@@ -9,8 +20,8 @@ import time
 from uuid import uuid4
 from typing import Any
 
-from rag_demo.config import Settings
-from rag_demo.models import AccessContext
+from boundary_rag.config import Settings
+from boundary_rag.models import AccessContext
 
 
 class AuthError(ValueError):
@@ -27,6 +38,7 @@ PASSWORD_HASH_ITERATIONS = 210_000
 
 
 def create_session_token() -> str:
+    """创建带有可识别前缀的不透明浏览器会话 token。"""
     return f"{SESSION_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
 
 
@@ -35,11 +47,16 @@ def is_session_token(token: str) -> bool:
 
 
 def session_cache_key(token: str) -> str:
+    """把会话 token 哈希后再作为 Redis key 使用。
+
+    Redis key 在调试时可能被查看，因此不能把原始 bearer 凭证直接写进 key。
+    """
     digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
     return f"session:{digest}"
 
 
 def hash_password(password: str, *, salt: bytes | None = None) -> str:
+    """使用 PBKDF2-SHA256 哈希密码，并把算法参数编码进结果中。"""
     salt = salt or secrets.token_bytes(16)
     derived = hashlib.pbkdf2_hmac(
         "sha256",
@@ -58,6 +75,7 @@ def hash_password(password: str, *, salt: bytes | None = None) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    """校验密码，同时避免泄露计时侧信道信息。"""
     try:
         scheme, iterations, salt_segment, expected_segment = password_hash.split(":", 3)
         if scheme != PASSWORD_HASH_SCHEME:
@@ -76,10 +94,12 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def decode_access_token(token: str, settings: Settings) -> AccessContext:
+    """把 JWT 直接解码为请求使用的访问上下文。"""
     return access_from_claims(decode_access_token_payload(token, settings))
 
 
 def decode_access_token_payload(token: str, settings: Settings) -> dict[str, Any]:
+    """校验 HS256 JWT，并返回其中的 claims。"""
     if not settings.jwt_secret:
         raise AuthConfigError("RAG_JWT_SECRET is required when JWT authentication is used")
 
@@ -107,6 +127,7 @@ def sign_access_token(
     expires_in_seconds: int = 3600,
     issued_at: int | None = None,
 ) -> str:
+    """使用与会话一致的 AccessContext 结构签发 API 访问 JWT。"""
     if not settings.jwt_secret:
         raise AuthConfigError("RAG_JWT_SECRET is required to sign JWT tokens")
 
@@ -134,6 +155,7 @@ def sign_access_token(
 
 
 def token_cache_id(token: str, payload: dict[str, Any]) -> str:
+    """为 JWT 选择稳定的 Redis 撤销标识。"""
     jti = payload.get("jti")
     if isinstance(jti, str) and jti.strip():
         return jti
@@ -141,6 +163,7 @@ def token_cache_id(token: str, payload: dict[str, Any]) -> str:
 
 
 def token_expires_in_seconds(payload: dict[str, Any], *, now: int | None = None) -> int:
+    """返回 JWT 剩余有效期，用作 Redis 黑名单 TTL。"""
     current = int(time.time()) if now is None else now
     exp = payload.get("exp")
     if not isinstance(exp, int | float):
@@ -150,6 +173,7 @@ def token_expires_in_seconds(payload: dict[str, Any], *, now: int | None = None)
 
 
 def access_from_claims(payload: dict[str, Any]) -> AccessContext:
+    """把已校验的 claims 转为服务层使用的授权对象。"""
     return _access_from_claims(payload)
 
 
@@ -171,6 +195,7 @@ def _decode_json(segment: str) -> dict[str, Any]:
 
 
 def _validate_registered_claims(payload: dict[str, Any], *, settings: Settings) -> None:
+    """校验 JWT 标准时间、签发方和受众约束。"""
     now = int(time.time())
     leeway = settings.jwt_leeway_seconds
 

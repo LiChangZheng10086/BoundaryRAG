@@ -1,3 +1,10 @@
+"""BoundaryRAG 的元数据存储层。
+
+SQLite 是产品实体的主要持久化存储：用户、知识库、文档、生成产物、对话和
+操作事件。`JsonStore` 保留为轻量旧版/开发存储，也作为旧 `.rag_data/*.json`
+文件的导入来源。向量分块存在 Milvus Lite 中，不存在这里。
+"""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +13,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
-from rag_demo.models import (
+from boundary_rag.models import (
     ArtifactRecord,
     Chunk,
     Conversation,
@@ -21,6 +28,8 @@ from rag_demo.models import (
 
 
 class JsonStore:
+    """为了迁移兼容保留的旧版 JSON 文件元数据存储。"""
+
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -326,6 +335,7 @@ class JsonStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def _write_json(self, filename: str, data: list[dict]) -> None:
+        """先写临时文件再替换，避免中断写入破坏 JSON。"""
         path = self.data_dir / filename
         tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
@@ -337,7 +347,10 @@ class JsonStore:
 
 
 class SqliteStore:
+    """由 SQLite 支撑的元数据存储，包含简单迁移和审计事件。"""
+
     def __init__(self, db_path: Path, *, legacy_data_dir: Path | None = None) -> None:
+        """创建 schema、初始化演示账号，并导入旧 JSON 元数据。"""
         self.db_path = db_path
         self.data_dir = legacy_data_dir or db_path.parent
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,6 +372,7 @@ class SqliteStore:
         return self._user_from_row(row) if row else None
 
     def upsert_user(self, user: UserAccount) -> UserAccount:
+        """在本地数据库中创建或更新登录账号。"""
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
@@ -388,7 +402,8 @@ class SqliteStore:
         return user
 
     def seed_default_users(self) -> None:
-        from rag_demo.auth import hash_password
+        """如果不存在，则创建用户要求的两个演示账号。"""
+        from boundary_rag.auth import hash_password
 
         now = utc_now()
         defaults = [
@@ -421,6 +436,7 @@ class SqliteStore:
         return self._kb_from_row(row) if row else None
 
     def create_knowledge_base(self, kb: KnowledgeBase, *, user_id: str = "system") -> KnowledgeBase:
+        """持久化 KB，并记录创建人。"""
         with self._lock, self._connect() as conn:
             exists = conn.execute("select 1 from knowledge_bases where id = ?", (kb.id,)).fetchone()
             if exists:
@@ -440,6 +456,7 @@ class SqliteStore:
         return kb
 
     def delete_knowledge_base(self, kb_id: str, *, user_id: str = "system") -> bool:
+        """在单个事务中删除某个 KB 关联的全部 SQLite 元数据。"""
         with self._lock, self._connect() as conn:
             row = conn.execute("select id, tenant_id from knowledge_bases where id = ?", (kb_id,)).fetchone()
             if not row:
@@ -470,6 +487,7 @@ class SqliteStore:
             return True
 
     def add_document(self, document: Document, *, user_id: str = "system") -> Document:
+        """在向量索引开始前持久化文档元数据。"""
         with self._lock, self._connect() as conn:
             self._insert_document(conn, document)
             self._insert_operation(
@@ -563,6 +581,7 @@ class SqliteStore:
         error: str = "",
         user_id: str = "system",
     ) -> Document:
+        """持久化 indexing/indexed/failed 状态，并记录操作事件。"""
         document = self.get_document(kb_id=kb_id, document_id=document_id)
         if not document:
             raise KeyError(f"document '{document_id}' does not exist")
@@ -589,6 +608,7 @@ class SqliteStore:
         return document
 
     def delete_document(self, *, kb_id: str, document_id: str, user_id: str = "system") -> bool:
+        """删除文档元数据；向量删除由 RagService 负责。"""
         with self._lock, self._connect() as conn:
             document = conn.execute(
                 "select title from documents where knowledge_base_id = ? and id = ?",
@@ -612,6 +632,7 @@ class SqliteStore:
             return True
 
     def add_artifact(self, artifact: ArtifactRecord) -> ArtifactRecord:
+        """持久化生成产物元数据，用于历史记录和下载。"""
         with self._lock, self._connect() as conn:
             self._insert_artifact(conn, artifact)
             self._insert_operation(
@@ -674,6 +695,7 @@ class SqliteStore:
             return True
 
     def create_conversation(self, conversation: Conversation) -> Conversation:
+        """持久化新的用户级隔离对话线程。"""
         with self._lock, self._connect() as conn:
             self._insert_conversation(conn, conversation)
             self._insert_operation(
@@ -733,6 +755,7 @@ class SqliteStore:
         return self._conversation_from_row(row)
 
     def add_conversation_message(self, message: ConversationMessage) -> ConversationMessage:
+        """持久化一条消息；服务层检查在调用前完成。"""
         with self._lock, self._connect() as conn:
             self._insert_conversation_message(conn, message)
         return message
@@ -762,9 +785,11 @@ class SqliteStore:
         return [self._operation_from_row(row) for row in rows]
 
     def read_legacy_chunks(self) -> list[Chunk]:
+        """读取 Milvus 引入前的 chunk JSON，供启动时迁移一次向量。"""
         return [Chunk.model_validate(item) for item in self._read_json("chunks.json", [])]
 
     def mark_legacy_chunks_migrated(self) -> None:
+        """成功迁移到 Milvus Lite 后，重命名旧 chunk JSON。"""
         path = self.data_dir / "chunks.json"
         if not path.exists():
             return
@@ -772,6 +797,7 @@ class SqliteStore:
         path.replace(migrated_path)
 
     def migrate_from_json(self, data_dir: Path) -> None:
+        """导入旧 JSON 元数据，但不覆盖已有 SQLite 行。"""
         with self._lock, self._connect() as conn:
             imported = {
                 "knowledge_bases": self._migrate_knowledge_bases(conn, data_dir),
@@ -790,6 +816,7 @@ class SqliteStore:
                 )
 
     def _init_schema(self) -> None:
+        """为本地 SQLite DB 创建表、索引和增量迁移。"""
         with self._connect() as conn:
             conn.executescript(
                 """
@@ -873,8 +900,8 @@ class SqliteStore:
 
                 """
             )
-            # Existing local SQLite files may predate user ownership. Add new
-            # columns before creating indexes that depend on them.
+            # 现有本地 SQLite 文件可能早于用户归属字段。先补充新列，
+            # 再创建依赖这些列的索引。
             self._ensure_column(
                 conn,
                 table_name="knowledge_bases",
@@ -897,6 +924,7 @@ class SqliteStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
+        """打开启用 Row 对象、WAL 和外键检查的 SQLite 连接。"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         conn.execute("pragma journal_mode = wal")
@@ -911,6 +939,7 @@ class SqliteStore:
         column_name: str,
         column_sql: str,
     ) -> None:
+        """仅在旧本地 DB 缺少某列时补充该列。"""
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table_name})").fetchall()}
         if column_name not in columns:
             conn.execute(f"alter table {table_name} add column {column_sql}")
@@ -1026,6 +1055,7 @@ class SqliteStore:
         *,
         ignore_existing: bool = False,
     ) -> None:
+        """追加审计式事件行，用于 UI 历史和调试。"""
         clause = "insert or ignore" if ignore_existing else "insert"
         conn.execute(
             f"""
@@ -1049,18 +1079,21 @@ class SqliteStore:
         )
 
     def _migrate_knowledge_bases(self, conn: sqlite3.Connection, data_dir: Path) -> int:
+        """导入旧 KB 行，并返回插入数量。"""
         before = conn.total_changes
         for item in self._read_json_from(data_dir, "knowledge_bases.json", []):
             self._insert_knowledge_base(conn, KnowledgeBase.model_validate(item), ignore=True)
         return conn.total_changes - before
 
     def _migrate_documents(self, conn: sqlite3.Connection, data_dir: Path) -> int:
+        """导入旧文档行，并返回插入数量。"""
         before = conn.total_changes
         for item in self._read_json_from(data_dir, "documents.json", []):
             self._insert_document(conn, Document.model_validate(item), ignore=True)
         return conn.total_changes - before
 
     def _migrate_artifacts(self, conn: sqlite3.Connection, data_dir: Path) -> int:
+        """导入旧产物行，并返回插入数量。"""
         before = conn.total_changes
         for item in self._read_json_from(data_dir, "artifacts.json", []):
             self._insert_artifact(conn, ArtifactRecord.model_validate(item), ignore=True)

@@ -1,3 +1,11 @@
+"""BoundaryRAG 的 FastAPI HTTP 接入层。
+
+本模块刻意保持轻量：负责把 HTTP 请求转换为 `AccessContext`，
+再把业务处理交给 `RagService`，最后把领域异常转换为 API 状态码。
+持久化对象通过 `lru_cache` 缓存，因为 FastAPI 依赖注入会在每次请求时
+调用这些工厂函数。
+"""
+
 from __future__ import annotations
 
 import time
@@ -8,7 +16,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from rag_demo.auth import (
+from boundary_rag.auth import (
     AuthConfigError,
     AuthError,
     access_from_claims,
@@ -20,12 +28,12 @@ from rag_demo.auth import (
     token_expires_in_seconds,
     verify_password,
 )
-from rag_demo.cache import RedisCache, RedisUnavailableError, create_redis_cache
-from rag_demo.config import get_settings
-from rag_demo.document_parsers import UploadSecurityPolicy
-from rag_demo.embeddings import create_embedding_provider
-from rag_demo.llm import create_llm_provider
-from rag_demo.models import (
+from boundary_rag.cache import RedisCache, RedisUnavailableError, create_redis_cache
+from boundary_rag.config import get_settings
+from boundary_rag.document_parsers import UploadSecurityPolicy
+from boundary_rag.embeddings import create_embedding_provider
+from boundary_rag.llm import create_llm_provider
+from boundary_rag.models import (
     AccessContext,
     ArtifactPreview,
     ArtifactSummary,
@@ -48,21 +56,22 @@ from rag_demo.models import (
     SkillRequest,
     SkillResponse,
 )
-from rag_demo.service import RagService
-from rag_demo.store import SqliteStore
-from rag_demo.vector_store import create_chunk_store
+from boundary_rag.service import RagService
+from boundary_rag.store import SqliteStore
+from boundary_rag.vector_store import create_chunk_store
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """在 Uvicorn 关闭时释放共享的异步客户端。"""
     try:
         yield
     finally:
         await get_redis_cache().close()
 
 
-app = FastAPI(title="RAG Demo", version="0.1.0", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="rag_demo/web"), name="static")
+app = FastAPI(title="BoundaryRAG", version="0.1.0", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory="boundary_rag/web"), name="static")
 
 
 def parse_tag_string(value: str) -> list[str]:
@@ -87,6 +96,13 @@ async def get_access_context(
     x_permission_tags: str = Header(default=""),
     cache: RedisCache = Depends(get_redis_cache),
 ) -> AccessContext:
+    """从 Redis 会话、JWT 或演示请求头中解析当前调用者。
+
+    这里的优先级很重要：
+    1. `brg_...` 密码登录会话存储在 Redis 中，是浏览器登录的常规路径。
+    2. JWT Bearer token 保留给 API 客户端和集成测试使用。
+    3. 演示请求头只允许在 `RAG_AUTH_MODE=demo` 时使用。
+    """
     settings = get_settings()
     if settings.auth_mode not in {"demo", "jwt"}:
         raise HTTPException(status_code=500, detail=f"unsupported RAG_AUTH_MODE '{settings.auth_mode}'")
@@ -124,6 +140,7 @@ async def get_access_context(
 
 
 async def access_context_from_session_token(*, token: str, cache: RedisCache) -> AccessContext | None:
+    """从 Redis 加载账号密码登录产生的会话。"""
     if not is_session_token(token):
         return None
     if not cache.enabled:
@@ -144,6 +161,7 @@ async def access_context_from_session_token(*, token: str, cache: RedisCache) ->
 
 
 def require_bearer_token(authorization: str | None) -> str:
+    """校验 Authorization 请求头并去掉 `Bearer` 前缀。"""
     if not authorization:
         raise HTTPException(status_code=401, detail="missing Bearer token")
     scheme, _, token = authorization.partition(" ")
@@ -154,11 +172,16 @@ def require_bearer_token(authorization: str | None) -> str:
 
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
-    return FileResponse("rag_demo/web/index.html")
+    return FileResponse("boundary_rag/web/index.html")
 
 
 @lru_cache
 def get_service() -> RagService:
+    """构建主 RAG 服务，并在启动时迁移一次旧的本地 chunk 数据。
+
+    SQLite 负责业务元数据，Milvus Lite 负责向量，Redis 负责短期会话状态。
+    把这些依赖集中在一个工厂函数里，可以让路由处理函数更容易阅读。
+    """
     settings = get_settings()
     store = SqliteStore(settings.sqlite_path, legacy_data_dir=settings.data_dir)
     chunk_store = create_chunk_store(uri=settings.milvus_uri, collection_name=settings.milvus_collection)
@@ -229,6 +252,7 @@ async def login(
     cache: RedisCache = Depends(get_redis_cache),
     user_store: SqliteStore = Depends(get_user_store),
 ) -> LoginResponse:
+    """校验 SQLite 用户，并写入一个有效期一天的 Redis 会话 token。"""
     settings = get_settings()
     try:
         status = await cache.status()
@@ -532,6 +556,7 @@ async def query_stream(
     access: AccessContext = Depends(get_access_context),
     service: RagService = Depends(get_service),
 ) -> StreamingResponse:
+    """以纯文本流式返回答案，方便前端逐 token 渲染。"""
     try:
         chunks = await service.query_stream(
             kb_id=kb_id,
