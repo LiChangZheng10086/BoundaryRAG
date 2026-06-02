@@ -5,6 +5,7 @@ BoundaryRAG 是一个强调“知识库边界”的本地 RAG 项目。它的目
 
 ## 项目解决的问题
 
+- 用户级隔离：每个登录用户只能看到自己创建的知识库、文档、会话和生成历史，管理员也不默认跨用户查看数据。
 - 多知识库隔离：所有文档、检索、问答、生成都绑定 `knowledge_base_id`，避免串库回答。
 - 租户隔离：通过 `tenant_id` 控制知识库、文档、会话和生成物归属。
 - 权限隔离：通过 `permission_tags` 控制文档、召回结果和生成物可见范围。
@@ -30,6 +31,7 @@ BoundaryRAG 是一个强调“知识库边界”的本地 RAG 项目。它的目
 
 - 知识库边界：每个 API 都带 `kb_id`，文档、chunk、会话、生成物都绑定 `knowledge_base_id`。
 - 向量边界：Milvus Lite 查询时使用 `knowledge_base_id` 和 `tenant_id` 过滤，只召回当前知识库的数据。
+- 用户边界：知识库写入 `owner_user_id`，列表、文档、会话和生成历史都按当前登录用户过滤。
 - 租户边界：`tenant_id` 不一致时不能创建、读取或生成，防止跨租户访问。
 - 权限边界：文档和生成物可以设置 `permission_tags`，用户权限不足时看不到对应内容。
 - 技能边界：每个知识库通过 `allowed_skills` 控制是否允许问答、写文档、生成 Markdown、Word 或 PPT。
@@ -53,7 +55,7 @@ Word/PPT 不是把原文简单拼接成文件，而是走一条“检索增强�
 | --- | --- |
 | 后端 | Python 3.11、FastAPI、Uvicorn、Pydantic v2 |
 | 前端 | Vue 3、Vite、组件化工作台 |
-| 认证 | Demo Header、JWT HS256 |
+| 认证 | 账号密码登录、Redis session token、JWT HS256、Demo Header |
 | 业务存储 | SQLite |
 | 缓存 / 会话短状态 | Redis |
 | 向量存储 | Milvus Lite，本地文件模式 |
@@ -69,6 +71,7 @@ Word/PPT 不是把原文简单拼接成文件，而是走一条“检索增强�
 浏览器
   -> FastAPI
     -> 认证与访问上下文
+    -> 用户级 owner 边界
     -> SQLite 业务元数据
     -> 文档解析 / 安全检查 / 超时控制
     -> 结构化切分 / parent-child chunk
@@ -101,6 +104,7 @@ flowchart LR
 ### 知识库边界
 
 - 每个知识库都有独立的 `id`、`tenant_id`、`permission_tags` 和 `allowed_skills`。
+- 每个新建知识库都会记录 `owner_user_id`，后端按当前 `user_id` 过滤，不依赖前端隐藏。
 - 删除知识库时会同步清理该知识库下的文档、向量 chunk、会话和生成物。
 - 问答、文档生成、预览、下载都只在当前知识库和当前访问权限内执行。
 
@@ -118,12 +122,13 @@ flowchart LR
 - DeepSeek 模式下使用 `stream=true` 返回流式内容。
 - 前端问答区默认不展示来源卡片，来源仅作为内部 RAG 依据和后端返回数据使用。
 - 会话会保存上下文，刷新页面后可以继续查看历史对话。
-- 退出登录时会把 JWT 写入 Redis 黑名单，避免仅靠前端清 Token。
+- 账号密码登录会把 session token 写入 Redis，退出登录会删除 Redis session；JWT 退出时会写入 Redis 黑名单。
 
 ### 登录页与用户隔离
 
 - 启动后先进入独立登录页，登录后才会打开主工作台。
-- 支持 JWT 登录和演示身份登录，登录态按 `user_id + tenant_id + permission_tags` 划分本地命名空间。
+- 支持账号密码登录、JWT 登录和演示身份登录，登录态按 `user_id + tenant_id + permission_tags` 划分本地命名空间。
+- 普通用户和管理员都默认只能看到自己创建的知识库；管理员角色不等于跨用户可见。
 - 最近知识库、历史对话、当前知识库、筛选条件都会按用户隔离保存，不会串到其他登录用户。
 - 退出登录会回到登录页，并清理当前会话态。
 
@@ -146,6 +151,7 @@ flowchart LR
 主要保存：
 
 - `knowledge_bases`：知识库、租户、权限和允许技能。
+- `users`：账号、密码哈希、角色、租户和权限标签。
 - `documents`：文档正文、索引状态、失败原因和元数据。
 - `artifacts`：生成物记录和下载信息。
 - `conversations`：会话列表。
@@ -191,6 +197,7 @@ redis://localhost:6379/0
 
 当前项目把 Redis 用在：
 
+- 账号密码登录 session token，默认 TTL 86400 秒。
 - JWT 退出登录黑名单
 - 后续可扩展的限流、短期缓存、任务状态
 
@@ -372,7 +379,12 @@ RAG_REDIS_DEFAULT_TTL_SECONDS=86400
   -> 前端后续请求携带 Authorization: Bearer <token>
 ```
 
-普通用户只能访问自己创建的新知识库；管理员可以访问同租户下全部知识库。历史遗留的无 owner 知识库会作为共享数据保留可见，避免旧数据升级后直接丢失。
+用户级隔离规则：
+
+- `lcz10086` 只能看到 `lcz10086` 创建的知识库。
+- `rag_user` 也只能看到 `rag_user` 创建的知识库。
+- 管理员角色主要用于自己账号空间内的管理能力和权限标签豁免，不代表可以默认读取其他用户的知识库。
+- 这个隔离由后端 `owner_user_id == 当前 user_id` 强制校验，前端只做展示配合。
 
 ### 兼容 JWT / Demo
 
