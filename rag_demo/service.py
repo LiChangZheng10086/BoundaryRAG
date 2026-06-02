@@ -79,12 +79,12 @@ class RagService:
         self.skills = SkillRegistry(artifact_dir)
 
     def create_knowledge_base(self, data: KnowledgeBaseCreate, access: AccessContext | None = None) -> KnowledgeBase:
-        if access:
-            if data.tenant_id != access.tenant_id:
-                raise PermissionError(f"cannot create knowledge base in tenant '{data.tenant_id}'")
-            self._require_tags(data.permission_tags, access=access, subject=f"knowledge base '{data.id}'")
-        kb = KnowledgeBase(**data.model_dump())
-        return self.store.create_knowledge_base(kb, user_id=access.user_id if access else "system")
+        access = access or AccessContext()
+        if data.tenant_id != access.tenant_id:
+            raise PermissionError(f"cannot create knowledge base in tenant '{data.tenant_id}'")
+        self._require_tags(data.permission_tags, access=access, subject=f"knowledge base '{data.id}'")
+        kb = KnowledgeBase(**data.model_dump(), owner_user_id=access.user_id)
+        return self.store.create_knowledge_base(kb, user_id=access.user_id)
 
     def list_knowledge_bases(self, access: AccessContext | None = None) -> list[KnowledgeBase]:
         items = self.store.list_knowledge_bases()
@@ -94,7 +94,12 @@ class RagService:
             kb
             for kb in items
             if kb.tenant_id == access.tenant_id
-            and (not kb.permission_tags or set(kb.permission_tags).issubset(set(access.permission_tags)))
+            and self._can_access_kb(kb, access=access)
+            and (
+                self._is_admin(access)
+                or not kb.permission_tags
+                or set(kb.permission_tags).issubset(set(access.permission_tags))
+            )
         ]
 
     def delete_knowledge_base(self, *, kb_id: str, access: AccessContext | None = None) -> None:
@@ -189,11 +194,11 @@ class RagService:
         chunk_counts = self.chunk_store.count_chunks_by_document(
             kb_id=kb_id,
             tenant_id=access.tenant_id,
-            permission_tags=access.permission_tags,
+            permission_tags=None if self._is_admin(access) else access.permission_tags,
         )
         return self.store.list_documents(
             kb_id=kb_id,
-            permission_tags=access.permission_tags,
+            permission_tags=None if self._is_admin(access) else access.permission_tags,
             chunk_counts=chunk_counts,
         )
 
@@ -511,6 +516,8 @@ class RagService:
         access = access or AccessContext()
         self._require_kb(kb_id, access=access)
         records = self.store.list_artifacts(kb_id=kb_id, permission_tags=access.permission_tags)
+        if self._is_admin(access):
+            records = self.store.list_artifacts(kb_id=kb_id, permission_tags=None)
         return [
             ArtifactSummary(
                 id=record.id,
@@ -525,7 +532,8 @@ class RagService:
                 created_at=record.created_at,
             )
             for record in records
-            if record.tenant_id == access.tenant_id and record.user_id == access.user_id
+            if record.tenant_id == access.tenant_id
+            and record.user_id == access.user_id
         ]
 
     def list_operation_events(
@@ -629,10 +637,25 @@ class RagService:
             raise KeyError(f"knowledge base '{kb_id}' does not exist")
         if access and kb.tenant_id != access.tenant_id:
             raise PermissionError(f"knowledge base '{kb_id}' is not in tenant '{access.tenant_id}'")
-        if access and kb.permission_tags and not set(kb.permission_tags).issubset(set(access.permission_tags)):
+        if access and not self._can_access_kb(kb, access=access):
+            raise PermissionError(f"knowledge base '{kb_id}' is not accessible")
+        if (
+            access
+            and not self._is_admin(access)
+            and kb.permission_tags
+            and not set(kb.permission_tags).issubset(set(access.permission_tags))
+        ):
             raise PermissionError(f"missing permission tags for knowledge base '{kb_id}'")
         return kb
 
     def _require_tags(self, required_tags: list[str], *, access: AccessContext, subject: str) -> None:
+        if self._is_admin(access):
+            return
         if required_tags and not set(required_tags).issubset(set(access.permission_tags)):
             raise PermissionError(f"missing permission tags for {subject}")
+
+    def _can_access_kb(self, kb: KnowledgeBase, *, access: AccessContext) -> bool:
+        return kb.owner_user_id == access.user_id
+
+    def _is_admin(self, access: AccessContext) -> bool:
+        return access.role == "admin"

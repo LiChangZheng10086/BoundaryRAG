@@ -52,7 +52,7 @@ Word/PPT 不是把原文简单拼接成文件，而是走一条“检索增强�
 | 层级 | 技术 |
 | --- | --- |
 | 后端 | Python 3.11、FastAPI、Uvicorn、Pydantic v2 |
-| 前端 | 原生 HTML、CSS、JavaScript |
+| 前端 | Vue 3、Vite、组件化工作台 |
 | 认证 | Demo Header、JWT HS256 |
 | 业务存储 | SQLite |
 | 缓存 / 会话短状态 | Redis |
@@ -269,13 +269,30 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-### 2. 启动服务
+### 2. 构建前端
 
-如果启用 Redis，可以先启动本地 Redis：
+前端源码在 `frontend/`，构建产物会写入 `rag_demo/web/` 并由 FastAPI 托管。仓库里保留了最新构建产物；如果你修改过前端，或想从源码重新构建，请执行：
+
+```bash
+npm install
+npm run build
+```
+
+### 3. 启动 Redis
+
+账号密码登录会把登录 token 写入 Redis，并缓存 1 天。可以用 Docker Compose 启动：
+
+```bash
+docker compose up -d redis
+```
+
+也可以直接启动 Redis 容器：
 
 ```bash
 docker run --name boundaryrag-redis -p 6379:6379 -d redis:7
 ```
+
+### 4. 启动服务
 
 然后启动 FastAPI：
 
@@ -283,13 +300,13 @@ docker run --name boundaryrag-redis -p 6379:6379 -d redis:7
 uvicorn rag_demo.app:app --reload
 ```
 
-### 3. 打开页面
+### 5. 打开页面
 
 ```text
 http://127.0.0.1:8000/
 ```
 
-前端由 FastAPI 直接托管 `rag_demo/web/`，没有单独的 npm 启动命令。建议使用 `http://127.0.0.1:8000/`，不要直接使用 `file://` 测试接口能力。
+前端由 FastAPI 直接托管 `rag_demo/web/`，建议使用 `http://127.0.0.1:8000/`，不要直接使用 `file://` 测试接口能力。前端开发时可使用 `npm run dev` 启动 Vite，开发服务器已把后端 API 代理到 `http://127.0.0.1:8000`。
 
 ## 环境变量
 
@@ -324,22 +341,45 @@ RAG_JWT_SECRET=换成足够长的随机密钥
 RAG_JWT_ISSUER=
 RAG_JWT_AUDIENCE=
 RAG_JWT_LEEWAY_SECONDS=30
+RAG_AUTH_SESSION_TTL_SECONDS=86400
 
-RAG_REDIS_ENABLED=false
+RAG_REDIS_ENABLED=true
 RAG_REDIS_URL=redis://localhost:6379/0
 RAG_REDIS_KEY_PREFIX=boundaryrag
 RAG_REDIS_TIMEOUT_SECONDS=1
-RAG_REDIS_DEFAULT_TTL_SECONDS=3600
+RAG_REDIS_DEFAULT_TTL_SECONDS=86400
 ```
 
 ## 认证方式
 
-### 选型建议
+### 默认账号密码登录
+
+项目启动时会在 SQLite `users` 表中写入两个账号，密码只保存 PBKDF2 哈希，不保存明文：
+
+| 用户名 | 密码 | 角色 |
+| --- | --- | --- |
+| `rag_user` | `rag_user123456` | 管理员 |
+| `lcz10086` | `lcz123456` | 普通用户 |
+
+登录流程：
+
+```text
+用户名/密码
+  -> POST /auth/login
+  -> SQLite 校验 users 表
+  -> 生成 Bearer token
+  -> Redis 写入 token session，TTL 86400 秒
+  -> 前端后续请求携带 Authorization: Bearer <token>
+```
+
+普通用户只能访问自己创建的新知识库；管理员可以访问同租户下全部知识库。历史遗留的无 owner 知识库会作为共享数据保留可见，避免旧数据升级后直接丢失。
+
+### 兼容 JWT / Demo
 
 - 如果你想快速做一个标准 REST API，`FastAPI` 自带的 `OAuth2PasswordBearer` + JWT 就够用。
 - 如果你想要现成的注册、登录、注销、重置密码、用户管理，`FastAPI Users` 更省事。
 - 如果你要接企业单点登录或第三方登录，`Authlib` 更合适，尤其是 OIDC/OAuth2 场景。
-- 这个项目当前采用的是自定义 JWT + Redis 黑名单，原因是它更轻，适合知识库类 MVP，同时保留了后续升级空间。
+- 这个项目当前采用“账号密码 + Redis session token”为主，同时保留 Demo Header 和 JWT Bearer 兼容能力，便于测试和后续企业登录扩展。
 
 ### Demo 模式
 
@@ -370,6 +410,7 @@ X-Permission-Tags: hr,finance
 
 - `GET /health`
 - `GET /runtime-config`
+- `POST /auth/login`
 - `POST /auth/logout`
 - `GET /operation-events`
 
@@ -425,21 +466,21 @@ X-Conversation-Id: conv_xxx
 
 ## 前端能力
 
-- 独立登录页，登录后再进入主工作台。
+- 独立账号密码登录页，登录后再进入主工作台。
 - 左侧支持知识库搜索、最近使用、当前知识库边界摘要。
 - 创建知识库是次要操作，不会挤占主要使用路径。
 - 问答、文档、生成、设置页面分区展示，避免结果串页。
 - 文档列表支持搜索、状态筛选、权限标签筛选和创建时间排序。
 - 文档状态以颜色标签展示，并常驻展示失败原因和重试入口。
 - 问答支持流式输出和历史对话面板。
-- 登录状态卡片展示用户、租户、权限、过期时间和退出入口。
+- 登录状态卡片展示用户、角色、租户、权限、过期时间和退出入口。
 - 顶部功能按钮尺寸固定，切换页面时不会变形。
 
 ## 测试
 
 ```bash
 python -m compileall -q rag_demo
-node --check rag_demo/web/app.js
+npm run build
 pytest -q
 ```
 

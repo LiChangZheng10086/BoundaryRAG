@@ -1,9 +1,10 @@
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-from rag_demo.app import app, get_redis_cache, get_service
+from rag_demo.app import app, get_redis_cache, get_service, get_user_store
 from rag_demo.auth import sign_access_token
 from rag_demo.config import Settings
 from rag_demo.embeddings import LocalHashEmbeddingProvider
@@ -28,9 +29,20 @@ class FakeRedisCache:
 
     def __init__(self) -> None:
         self.revoked: set[str] = set()
+        self.json_values: dict[str, object] = {}
 
     async def status(self):
         return SimpleNamespace(enabled=True, ready=True, url=self.safe_url, message="ok")
+
+    async def get_json(self, key: str):
+        return self.json_values.get(key)
+
+    async def set_json(self, key: str, value: object, *, ttl_seconds: int | None = None) -> None:
+        assert ttl_seconds is None or ttl_seconds > 0
+        self.json_values[key] = value
+
+    async def delete_json(self, key: str) -> None:
+        self.json_values.pop(key, None)
 
     async def revoke_jwt(self, token_id: str, *, ttl_seconds: int) -> None:
         assert ttl_seconds > 0
@@ -42,7 +54,9 @@ class FakeRedisCache:
 
 def test_api_uses_headers_not_body_for_permissions(tmp_path: Path) -> None:
     service = make_service(tmp_path)
+    cache = FakeRedisCache()
     app.dependency_overrides[get_service] = lambda: service
+    app.dependency_overrides[get_redis_cache] = lambda: cache
     try:
         client = TestClient(app)
         headers = {"X-Tenant-Id": "default", "X-Permission-Tags": "salary"}
@@ -97,9 +111,121 @@ def test_api_uses_headers_not_body_for_permissions(tmp_path: Path) -> None:
         app.dependency_overrides.clear()
 
 
+def test_password_login_uses_sqlite_users_and_redis_session(tmp_path: Path) -> None:
+    service = RagService(
+        store=SqliteStore(tmp_path / "boundaryrag.sqlite3"),
+        embeddings=LocalHashEmbeddingProvider(),
+        llm=LocalBoundaryLLMProvider(),
+        artifact_dir=tmp_path / "artifacts",
+    )
+    cache = FakeRedisCache()
+    app.dependency_overrides[get_service] = lambda: service
+    app.dependency_overrides[get_user_store] = lambda: service.store
+    app.dependency_overrides[get_redis_cache] = lambda: cache
+    try:
+        client = TestClient(app)
+        response = client.post("/auth/login", json={"username": "rag_user", "password": "rag_user123456"})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["token_type"] == "Bearer"
+        assert payload["expires_in"] == 86400
+        assert payload["user"]["role"] == "admin"
+        assert cache.json_values
+
+        headers = {"Authorization": f"Bearer {payload['access_token']}"}
+        response = client.post(
+            "/knowledge-bases",
+            headers=headers,
+            json={
+                "id": "kb_admin_owned",
+                "name": "管理员库",
+                "tenant_id": "default",
+                "allowed_skills": ["answer_question"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["owner_user_id"] == "rag_user"
+
+        response = client.post("/auth/logout", headers=headers)
+        assert response.status_code == 200
+        assert response.json()["revoked"] is True
+        assert not cache.json_values
+
+        rejected = client.get("/knowledge-bases", headers=headers)
+        assert rejected.status_code == 401
+
+        response = client.post("/auth/login", json={"username": "lcz10086", "password": "lcz123456"})
+        assert response.status_code == 200
+        user_payload = response.json()
+        assert user_payload["user"]["role"] == "user"
+        user_headers = {"Authorization": f"Bearer {user_payload['access_token']}"}
+        response = client.get("/knowledge-bases", headers=user_headers)
+        assert response.status_code == 200
+        assert response.json() == []
+
+        response = client.post(
+            "/knowledge-bases",
+            headers=user_headers,
+            json={
+                "id": "kb_user_owned",
+                "name": "普通用户库",
+                "tenant_id": "default",
+                "allowed_skills": ["answer_question"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["owner_user_id"] == "lcz10086"
+
+        user_list = client.get("/knowledge-bases", headers=user_headers)
+        assert user_list.status_code == 200
+        assert [item["id"] for item in user_list.json()] == ["kb_user_owned"]
+
+        response = client.post("/auth/login", json={"username": "rag_user", "password": "rag_user123456"})
+        assert response.status_code == 200
+        admin_headers = {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+        admin_list = client.get("/knowledge-bases", headers=admin_headers)
+        assert admin_list.status_code == 200
+        assert [item["id"] for item in admin_list.json()] == ["kb_admin_owned"]
+
+        forbidden = client.get("/knowledge-bases/kb_user_owned/documents", headers=admin_headers)
+        assert forbidden.status_code == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_sqlite_store_migrates_existing_kb_owner_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            create table knowledge_bases (
+                id text primary key,
+                name text not null,
+                description text not null default '',
+                tenant_id text not null default 'default',
+                allowed_skills_json text not null,
+                permission_tags_json text not null,
+                created_at text not null
+            );
+            """
+        )
+
+    store = SqliteStore(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(knowledge_bases)").fetchall()}
+
+    assert "owner_user_id" in columns
+    assert store.get_user("lcz10086").role == "user"
+    assert store.get_user("rag_user").role == "admin"
+
+
 def test_query_stream_returns_plain_answer_text(tmp_path: Path) -> None:
     service = make_service(tmp_path)
+    cache = FakeRedisCache()
     app.dependency_overrides[get_service] = lambda: service
+    app.dependency_overrides[get_redis_cache] = lambda: cache
     try:
         client = TestClient(app)
         response = client.post(
@@ -166,7 +292,9 @@ def test_jwt_auth_mode_requires_and_validates_bearer_token(tmp_path: Path, monke
     monkeypatch.setenv("RAG_JWT_SECRET", "test-secret")
 
     service = make_service(tmp_path)
+    cache = FakeRedisCache()
     app.dependency_overrides[get_service] = lambda: service
+    app.dependency_overrides[get_redis_cache] = lambda: cache
     try:
         client = TestClient(app)
 

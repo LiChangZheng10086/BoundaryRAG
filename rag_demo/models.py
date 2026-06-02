@@ -23,11 +23,14 @@ class KnowledgeBaseCreate(BaseModel):
 
 
 class KnowledgeBase(KnowledgeBaseCreate):
+    owner_user_id: str = ""
     created_at: str = Field(default_factory=utc_now)
 
 
 class AccessContext(BaseModel):
     user_id: str = "demo-user"
+    username: str = ""
+    role: str = "user"
     tenant_id: str = "default"
     permission_tags: list[str] = Field(default_factory=list)
 
@@ -208,6 +211,9 @@ class OperationEvent(BaseModel):
 
 class RuntimeConfig(BaseModel):
     auth_mode: str
+    user_store: str = "sqlite"
+    session_store: str
+    session_ttl_seconds: int
     metadata_store: str
     metadata_store_uri: str
     vector_store: str
@@ -228,3 +234,35 @@ class LogoutResponse(BaseModel):
     revoked: bool
     token_id: str = ""
     expires_at: int = 0
+
+
+class UserAccount(BaseModel):
+    username: str = Field(pattern=r"^[a-zA-Z0-9_-]{2,64}$")
+    password_hash: str
+    role: str = Field(pattern=r"^(admin|user)$")
+    tenant_id: str = "default"
+    permission_tags: list[str] = Field(default_factory=list)
+    active: bool = True
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class LoginRequest(ApiRequest):
+    username: str = Field(min_length=2, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class LoginUser(BaseModel):
+    username: str
+    user_id: str
+    role: str
+    tenant_id: str
+    permission_tags: list[str] = Field(default_factory=list)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_at: int
+    expires_in: int
+    user: LoginUser

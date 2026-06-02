@@ -1,0 +1,12 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: boundaryrag-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - boundaryrag-redis-data:/data
+
+volumes:
+  boundaryrag-redis-data:

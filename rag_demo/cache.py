@@ -78,6 +78,15 @@ class RedisCache:
         except Exception as exc:
             raise RedisUnavailableError(f"Redis is unavailable: {exc}") from exc
 
+    async def delete_json(self, key: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            client = await self._client_or_raise()
+            await client.delete(self._key("json", key))
+        except Exception as exc:
+            raise RedisUnavailableError(f"Redis is unavailable: {exc}") from exc
+
     async def revoke_jwt(self, token_id: str, *, ttl_seconds: int) -> None:
         if not self.enabled:
             raise RedisUnavailableError("Redis is disabled; set RAG_REDIS_ENABLED=true to revoke JWT tokens")

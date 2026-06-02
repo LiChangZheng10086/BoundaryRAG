@@ -28,7 +28,7 @@ class Retriever:
                 match.chunk,
             )
             for match in matches
-            if self._is_allowed(match.chunk.permission_tags, set(access.permission_tags))
+            if access.role == "admin" or self._is_allowed(match.chunk.permission_tags, set(access.permission_tags))
         ]
         scored.sort(key=lambda item: item[0]["score"], reverse=True)
 

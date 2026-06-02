@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 import time
 from uuid import uuid4
 from typing import Any
@@ -18,6 +19,60 @@ class AuthError(ValueError):
 
 class AuthConfigError(RuntimeError):
     pass
+
+
+SESSION_TOKEN_PREFIX = "brg_"
+PASSWORD_HASH_SCHEME = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = 210_000
+
+
+def create_session_token() -> str:
+    return f"{SESSION_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+def is_session_token(token: str) -> bool:
+    return token.startswith(SESSION_TOKEN_PREFIX)
+
+
+def session_cache_key(token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"session:{digest}"
+
+
+def hash_password(password: str, *, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PASSWORD_HASH_ITERATIONS,
+    )
+    return ":".join(
+        [
+            PASSWORD_HASH_SCHEME,
+            str(PASSWORD_HASH_ITERATIONS),
+            _b64_encode(salt),
+            _b64_encode(derived),
+        ]
+    )
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        scheme, iterations, salt_segment, expected_segment = password_hash.split(":", 3)
+        if scheme != PASSWORD_HASH_SCHEME:
+            return False
+        salt = _b64_decode(salt_segment)
+        expected = _b64_decode(expected_segment)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt,
+            int(iterations),
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(actual, expected)
 
 
 def decode_access_token(token: str, settings: Settings) -> AccessContext:
@@ -59,6 +114,8 @@ def sign_access_token(
     payload: dict[str, Any] = {
         "jti": f"jwt_{uuid4().hex}",
         "sub": access.user_id,
+        "username": access.username or access.user_id,
+        "role": access.role,
         "tenant_id": access.tenant_id,
         "permission_tags": access.permission_tags,
         "iat": now,
@@ -154,6 +211,8 @@ def _validate_registered_claims(payload: dict[str, Any], *, settings: Settings) 
 
 def _access_from_claims(payload: dict[str, Any]) -> AccessContext:
     user_id = payload.get("user_id") or payload.get("sub")
+    username = payload.get("username") or user_id
+    role = payload.get("role") or "user"
     tenant_id = payload.get("tenant_id")
     permission_tags = payload.get("permission_tags", [])
 
@@ -169,7 +228,16 @@ def _access_from_claims(payload: dict[str, Any]) -> AccessContext:
     else:
         raise AuthError("JWT permission_tags claim must be a string list")
 
-    return AccessContext(user_id=user_id, tenant_id=tenant_id, permission_tags=tags)
+    if role not in {"admin", "user"}:
+        raise AuthError("JWT role claim must be 'admin' or 'user'")
+
+    return AccessContext(
+        user_id=user_id,
+        username=username if isinstance(username, str) else user_id,
+        role=role,
+        tenant_id=tenant_id,
+        permission_tags=tags,
+    )
 
 
 def _sign(data: bytes, secret: str) -> bytes:

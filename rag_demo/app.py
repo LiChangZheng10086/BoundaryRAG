@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
@@ -11,9 +12,13 @@ from rag_demo.auth import (
     AuthConfigError,
     AuthError,
     access_from_claims,
+    create_session_token,
     decode_access_token_payload,
+    is_session_token,
+    session_cache_key,
     token_cache_id,
     token_expires_in_seconds,
+    verify_password,
 )
 from rag_demo.cache import RedisCache, RedisUnavailableError, create_redis_cache
 from rag_demo.config import get_settings
@@ -31,6 +36,9 @@ from rag_demo.models import (
     DocumentSummary,
     KnowledgeBase,
     KnowledgeBaseCreate,
+    LoginRequest,
+    LoginResponse,
+    LoginUser,
     OperationEvent,
     LogoutResponse,
     QueryRequest,
@@ -66,6 +74,12 @@ def get_redis_cache() -> RedisCache:
     return create_redis_cache(get_settings())
 
 
+@lru_cache
+def get_user_store() -> SqliteStore:
+    settings = get_settings()
+    return SqliteStore(settings.sqlite_path, legacy_data_dir=settings.data_dir)
+
+
 async def get_access_context(
     authorization: str | None = Header(default=None),
     x_user_id: str = Header(default="demo-user"),
@@ -80,6 +94,12 @@ async def get_access_context(
     if authorization:
         token = require_bearer_token(authorization)
         try:
+            session_access = await access_context_from_session_token(token=token, cache=cache)
+            if session_access:
+                return session_access
+            if is_session_token(token):
+                raise HTTPException(status_code=401, detail="login token is invalid or expired")
+
             payload = decode_access_token_payload(token, settings)
             if await cache.is_jwt_revoked(token_cache_id(token, payload)):
                 raise HTTPException(status_code=401, detail="JWT token has been revoked")
@@ -96,8 +116,30 @@ async def get_access_context(
 
     return AccessContext(
         user_id=x_user_id or "demo-user",
+        username=x_user_id or "demo-user",
+        role="user",
         tenant_id=x_tenant_id or "default",
         permission_tags=parse_tag_string(x_permission_tags),
+    )
+
+
+async def access_context_from_session_token(*, token: str, cache: RedisCache) -> AccessContext | None:
+    if not is_session_token(token):
+        return None
+    if not cache.enabled:
+        raise HTTPException(status_code=503, detail="Redis is required for password login sessions")
+    session = await cache.get_json(session_cache_key(token))
+    if not session:
+        return None
+    expires_at = int(session.get("expires_at") or 0)
+    if expires_at <= int(time.time()):
+        return None
+    return AccessContext(
+        user_id=str(session["user_id"]),
+        username=str(session.get("username") or session["user_id"]),
+        role=str(session.get("role") or "user"),
+        tenant_id=str(session["tenant_id"]),
+        permission_tags=list(session.get("permission_tags") or []),
     )
 
 
@@ -157,6 +199,9 @@ async def runtime_config(cache: RedisCache = Depends(get_redis_cache)) -> Runtim
     redis_status = await cache.status()
     return RuntimeConfig(
         auth_mode=settings.auth_mode,
+        user_store="sqlite",
+        session_store="redis" if redis_status.enabled else "disabled",
+        session_ttl_seconds=settings.auth_session_ttl_seconds,
         metadata_store="sqlite",
         metadata_store_uri=str(settings.sqlite_path),
         vector_store="milvus-lite",
@@ -178,6 +223,56 @@ async def runtime_config(cache: RedisCache = Depends(get_redis_cache)) -> Runtim
     )
 
 
+@app.post("/auth/login", response_model=LoginResponse)
+async def login(
+    payload: LoginRequest,
+    cache: RedisCache = Depends(get_redis_cache),
+    user_store: SqliteStore = Depends(get_user_store),
+) -> LoginResponse:
+    settings = get_settings()
+    try:
+        status = await cache.status()
+        if not status.enabled:
+            raise HTTPException(status_code=503, detail="Redis is disabled; password login requires Redis")
+        if not status.ready:
+            raise HTTPException(status_code=503, detail=f"Redis is unavailable: {status.message}")
+
+        username = payload.username.strip()
+        user = user_store.get_user(username)
+        if not user or not user.active or not verify_password(payload.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+        token = create_session_token()
+        now = int(time.time())
+        ttl_seconds = max(1, settings.auth_session_ttl_seconds)
+        expires_at = now + ttl_seconds
+        session = {
+            "token_type": "password_session",
+            "username": user.username,
+            "user_id": user.username,
+            "role": user.role,
+            "tenant_id": user.tenant_id,
+            "permission_tags": user.permission_tags,
+            "issued_at": now,
+            "expires_at": expires_at,
+        }
+        await cache.set_json(session_cache_key(token), session, ttl_seconds=ttl_seconds)
+        return LoginResponse(
+            access_token=token,
+            expires_at=expires_at,
+            expires_in=ttl_seconds,
+            user=LoginUser(
+                username=user.username,
+                user_id=user.username,
+                role=user.role,
+                tenant_id=user.tenant_id,
+                permission_tags=user.permission_tags,
+            ),
+        )
+    except RedisUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/auth/logout", response_model=LogoutResponse)
 async def logout(
     authorization: str | None = Header(default=None),
@@ -186,6 +281,10 @@ async def logout(
     settings = get_settings()
     token = require_bearer_token(authorization)
     try:
+        if is_session_token(token):
+            await cache.delete_json(session_cache_key(token))
+            return LogoutResponse(revoked=True, token_id=session_cache_key(token), expires_at=0)
+
         payload = decode_access_token_payload(token, settings)
         token_id = token_cache_id(token, payload)
         ttl_seconds = token_expires_in_seconds(payload)

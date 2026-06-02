@@ -15,6 +15,7 @@ from rag_demo.models import (
     DocumentSummary,
     KnowledgeBase,
     OperationEvent,
+    UserAccount,
     utc_now,
 )
 
@@ -286,6 +287,30 @@ class JsonStore:
         migrated_path = self.data_dir / "chunks.json.migrated"
         path.replace(migrated_path)
 
+    def get_user(self, username: str) -> UserAccount | None:
+        return next(
+            (
+                UserAccount.model_validate(item)
+                for item in self._read_json("users.json", [])
+                if item["username"] == username
+            ),
+            None,
+        )
+
+    def upsert_user(self, user: UserAccount) -> UserAccount:
+        with self._lock:
+            items = self._read_json("users.json", [])
+            updated = False
+            for index, item in enumerate(items):
+                if item["username"] == user.username:
+                    items[index] = user.model_dump()
+                    updated = True
+                    break
+            if not updated:
+                items.append(user.model_dump())
+            self._write_json("users.json", items)
+        return user
+
     def list_operation_events(self, *, limit: int = 100) -> list[OperationEvent]:
         return []
 
@@ -319,6 +344,7 @@ class SqliteStore:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self._init_schema()
+        self.seed_default_users()
         if legacy_data_dir:
             self.migrate_from_json(legacy_data_dir)
 
@@ -326,6 +352,68 @@ class SqliteStore:
         with self._connect() as conn:
             rows = conn.execute("select * from knowledge_bases order by created_at asc").fetchall()
         return [self._kb_from_row(row) for row in rows]
+
+    def get_user(self, username: str) -> UserAccount | None:
+        with self._connect() as conn:
+            row = conn.execute("select * from users where username = ?", (username,)).fetchone()
+        return self._user_from_row(row) if row else None
+
+    def upsert_user(self, user: UserAccount) -> UserAccount:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                insert into users (
+                    username, password_hash, role, tenant_id, permission_tags_json,
+                    active, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(username) do update set
+                    password_hash = excluded.password_hash,
+                    role = excluded.role,
+                    tenant_id = excluded.tenant_id,
+                    permission_tags_json = excluded.permission_tags_json,
+                    active = excluded.active,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user.username,
+                    user.password_hash,
+                    user.role,
+                    user.tenant_id,
+                    self._json_dumps(user.permission_tags),
+                    1 if user.active else 0,
+                    user.created_at,
+                    user.updated_at,
+                ),
+            )
+        return user
+
+    def seed_default_users(self) -> None:
+        from rag_demo.auth import hash_password
+
+        now = utc_now()
+        defaults = [
+            UserAccount(
+                username="rag_user",
+                password_hash=hash_password("rag_user123456"),
+                role="admin",
+                tenant_id="default",
+                permission_tags=[],
+                created_at=now,
+                updated_at=now,
+            ),
+            UserAccount(
+                username="lcz10086",
+                password_hash=hash_password("lcz123456"),
+                role="user",
+                tenant_id="default",
+                permission_tags=[],
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+        for user in defaults:
+            if not self.get_user(user.username):
+                self.upsert_user(user)
 
     def get_knowledge_base(self, kb_id: str) -> KnowledgeBase | None:
         with self._connect() as conn:
@@ -710,9 +798,21 @@ class SqliteStore:
                     name text not null,
                     description text not null default '',
                     tenant_id text not null default 'default',
+                    owner_user_id text not null default '',
                     allowed_skills_json text not null,
                     permission_tags_json text not null,
                     created_at text not null
+                );
+
+                create table if not exists users (
+                    username text primary key,
+                    password_hash text not null,
+                    role text not null,
+                    tenant_id text not null default 'default',
+                    permission_tags_json text not null,
+                    active integer not null default 1,
+                    created_at text not null,
+                    updated_at text not null
                 );
 
                 create table if not exists documents (
@@ -771,7 +871,21 @@ class SqliteStore:
                     created_at text not null
                 );
 
+                """
+            )
+            # Existing local SQLite files may predate user ownership. Add new
+            # columns before creating indexes that depend on them.
+            self._ensure_column(
+                conn,
+                table_name="knowledge_bases",
+                column_name="owner_user_id",
+                column_sql="owner_user_id text not null default ''",
+            )
+            conn.executescript(
+                """
+                create index if not exists idx_users_role on users(role);
                 create index if not exists idx_kb_tenant on knowledge_bases(tenant_id);
+                create index if not exists idx_kb_tenant_owner on knowledge_bases(tenant_id, owner_user_id);
                 create index if not exists idx_documents_kb on documents(knowledge_base_id);
                 create index if not exists idx_documents_status on documents(status);
                 create index if not exists idx_artifacts_kb_user on artifacts(knowledge_base_id, user_id);
@@ -789,19 +903,33 @@ class SqliteStore:
         conn.execute("pragma foreign_keys = on")
         return conn
 
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        column_name: str,
+        column_sql: str,
+    ) -> None:
+        columns = {row["name"] for row in conn.execute(f"pragma table_info({table_name})").fetchall()}
+        if column_name not in columns:
+            conn.execute(f"alter table {table_name} add column {column_sql}")
+
     def _insert_knowledge_base(self, conn: sqlite3.Connection, kb: KnowledgeBase, *, ignore: bool = False) -> None:
         clause = "insert or ignore" if ignore else "insert"
         conn.execute(
             f"""
             {clause} into knowledge_bases (
-                id, name, description, tenant_id, allowed_skills_json, permission_tags_json, created_at
-            ) values (?, ?, ?, ?, ?, ?, ?)
+                id, name, description, tenant_id, owner_user_id,
+                allowed_skills_json, permission_tags_json, created_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 kb.id,
                 kb.name,
                 kb.description,
                 kb.tenant_id,
+                kb.owner_user_id,
                 self._json_dumps(kb.allowed_skills),
                 self._json_dumps(kb.permission_tags),
                 kb.created_at,
@@ -948,9 +1076,22 @@ class SqliteStore:
             name=row["name"],
             description=row["description"],
             tenant_id=row["tenant_id"],
+            owner_user_id=row["owner_user_id"],
             allowed_skills=self._json_loads(row["allowed_skills_json"], []),
             permission_tags=self._json_loads(row["permission_tags_json"], []),
             created_at=row["created_at"],
+        )
+
+    def _user_from_row(self, row: sqlite3.Row) -> UserAccount:
+        return UserAccount(
+            username=row["username"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+            tenant_id=row["tenant_id"],
+            permission_tags=self._json_loads(row["permission_tags_json"], []),
+            active=bool(row["active"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
         )
 
     def _document_from_row(self, row: sqlite3.Row) -> Document:
